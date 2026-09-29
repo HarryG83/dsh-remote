@@ -1,0 +1,26 @@
+# dsh-mobile-remote — bundle layer.
+#
+# One Loader entry per package: this row mounts the Host half (the `${path}`
+# routes on ctx.webServer, the LAN bridge, the push bridge) and, through the
+# same entry's `dsh.client` manifest, the browser half (the settings page
+# 「连接移动端设备」). Registering the package as a bundle is what makes the
+# plugin manager list it under 插件 → 已安装: a dependency that declares no
+# `dsh.bundle` stays a plain dependency and is deliberately left out of that
+# list (see @deepseek-ai/dsh-plugin-manager).
+#
+# Every field here is overridden by the profile's own cordis.patch.yml and any
+# --patch overlay, so a deployment retunes or disables it there:
+#
+#   - id: mobile-remote
+#     name: dsh-mobile-remote
+#     config:
+#       path: /m
+#       authToken: <访问口令；留空 = 关闭认证>
+#       lanBridge: { enabled: true, port: 3080, host: 0.0.0.0 }
+#       pushUrls: [{ name: ntfy, url: https://ntfy.sh/<topic>, format: ntfy }]
+#
+# The Config schema defaults (path `/m`, no auth token, LAN bridge and push
+# bridge off) keep a bare row bootable before anyone configures it.
+- insert:
+    - id: mobile-remote
+      name: dsh-mobile-remote
