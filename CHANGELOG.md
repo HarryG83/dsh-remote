@@ -1,0 +1,704 @@
+# Changelog
+
+## v3.1.6（2026-09-29）— 二维码地址页签切换
+
+> 版本：插件 `3.1.6`。
+
+### 二维码多地址页签（组网场景）
+
+- 桌面设置页「连接移动端设备」在同时存在多个可达地址（内网 + 组网/外网）时，二维码上方新增**地址页签**，用户可点选要编码的链接；默认仍选「首个非回环」地址（与 v3.1.5 行为一致）。
+- 页签按地址类别标注（内网 / 组网 / Tailscale / 其他），与 `lib/index.js` `privateFirst` 排序口径一致；回环地址（`127.0.0.1` / `::1`）不进页签（手机扫了也连不上）。
+- 仅当非回环地址多于 1 个时才显示页签；切换后二维码即时重生成，下方标注「当前二维码」完整链接。
+- 二维码载荷格式（`DSHREMOTE|<url><path>|<token>`）保持不变，App 侧无需改动。
+
+## v3.1.5（2026-09-22，issue #12 / #15 / #19 / #22 / #24，PR #11 / #18 / #21）— 对话时间线 + 用量额度 + 复制对话 + 安全加固
+
+> 版本：插件 `3.1.5` / App `3.1.5+22`。
+> 验收门禁：`node --test test/*.mjs`（28）、`node tools/timeline-contract-check.mjs`（77）、`node tools/account-usage-check.mjs`（15）、`node tools/account-usage-adversarial-check.mjs`（19）、`flutter analyze`（0 issue）、`flutter test`（133）。
+
+### 对话时间线（工具调用与事件详情）
+
+- 对话页新增执行时间线：工具调用按 `callId` 关联调用与结果，合并为单张 Tool activity 卡片（参数/结果/失败态可展开）；**未知但用户可见**的事件进入通用事件卡，不再因 App 尚未认识而被静默丢弃。
+- 新增**普通 / 调试**两种展示模式（设置页开关，默认普通）：普通模式只呈现对话与工具活动；调试模式额外展示原始事件与按需加载的无损详情。**行为变更**：系统注入消息与协议/运行时记录在普通模式下不再占屏（v3.1.4 是折叠块），调试模式下仍可审阅。
+- 服务端新增 `GET /m/api/event-detail`（认证与其它 `/m/api/*` 一致）：按 durable `seq` 取单事件详情，稳定错误语义 `session-not-found` / `event-not-found` / `session-corrupt` / `event-read-failed` / `event-detail-too-large`（8 MiB）；原始异常与主机路径只进服务端日志，不进响应。
+- **事件保真与隐私边界（fail-closed）**：`assistant/chunk`、`assistant/attempt`、`request/header`、`request/context`、`session/title-llm-request`、`web/deepseek-search-llm-request`（LLM 请求快照，data 含 system prompt / messages）、`compaction/*`（含压缩摘要正文）、`system/message`（DSH 系统提示词）等内部记录在**历史、实时、详情三处都不下发**；详情面只对显式 allow-list 的可见类型返回原始载荷，其余类型不给 `detail` 指针、`/event-detail` 返回 404。其余未知事件仍在时间线保留（不静默丢弃）。
+- 详情正文在 App 侧统一钳制（默认 20000 字 + 截断标注）：详情返回的是原始事件，不钳制会把超长工具结果直接送进 markdown 解析与文本布局。
+- `/api/history` 的表面过滤由白名单改为 `isTimelineRecord` 黑名单，并新增 `hasMore` durable cursor 分页（`after`/`before`/`limit` 非法值 → 400，与既有参数校验一致）；降级（`historyMode: "current-surface"`）语义与 `configDegraded` 保持不变，降级会话的 `hasMore=false` **不代表历史到底**。
+- 验收门禁：`node tools/timeline-contract-check.mjs`（含「LLM 请求快照不得外泄」「未命名类型详情 404」两条新增断言）。
+- **修复工具卡片标题显示裸 `callId`**：服务端 `tool/result` 摘要在结果事件拿不到工具名时，用 `callId` 兜底写进了 `name`（`callId` 是关联 id，不是工具名）；App 侧合并规则 `data['name'] ?? … ?? current?.name` 因此让结果事件覆盖了 `tool/call` 学到的真名。只有带结果的调用在历史里才有 `tool/result`，所以现象恰好是「历史回放=裸 `call_00_...`、进行中=真名」的分裂。修复为服务端不再下发该兜底（名字未知就省略字段），App 侧把「`name` == `callId`」一律视为未知并保留上一次已知工具名（`timelineToolNameOf` 单一实现，四处调用点统一）；结果事件携带的真实错误名（如 `UserQuestionError`）与显式工具名照常保留。回归：`tool_name_callid_test.dart`（5 例）+ 契约检查 2 条断言。
+
+### 手机用量与额度
+
+- 设置 → 账户新增“用量与额度”详情页与来源数量摘要。
+- 服务端新增 `GET /m/api/account-usage`：DeepSeek CNY 余额、dsh-codex-connect 当前活动 Codex 账户配额、OpenCode Go 5h/周/月套餐窗口；凭据只在电脑端使用，来源独立失败/隐藏。
+- Codex Credits 与个人消费上限独立展示；配额显示剩余百分比、重置时间和三档风险颜色；DeepSeek 原充值与金额预警保持不变。
+- 新增服务端归一化自检 `node tools/account-usage-check.mjs` 与 App 模型测试 `usage_model_test.dart`。
+- 悬浮球面板新增「用量与额度」区块：展开时按需获取 + 客户端节流（2 分钟），不可用（旧插件 / 未配置 / 失败）时整体降级为原有单行余额；金额行保留文字（CNY 优先）、配额行只出细条与颜色、不出数字（每个进度条上方居中显示 5h / 每周 / 每月 窗口短标签）；面板不显示账户身份与附加 Codex bucket；配额窗口永不相加、不参与预警。点击区块/「详情 ▸」直达 App 用量页，「去充值」保留。顺带修复悬浮球余额取数非 CNY 优先（与详情页不一致）的问题。新增纯 Kotlin 面板模型 seam（JVM 单测 27 例）。
+
+### 安全与健壮性加固（PR #11 存活审计 + 五份全量复核）
+
+- **修复子代理与目标面板必然失败**：插件发出的 RPC 端点在宿主注册表里不存在（`subagent/list`、`subagent/interrupt`、`goal/*`）→ 改为内核真名与 wire 形状：`subagents/list`(`parentSessionId`)、`subagents/interruptByParent`(`childSessionId,parentSessionId,mode`)、`goals/create|pause|resume|complete`(`{agentId, request{objective,maxGoalRounds?}}` / `{agentId, ref{id,revision}}`)。
+- **修复问询取消/超时把 `null` 当答案交给内核**（内核读 `.answers` 抛 TypeError）：改为 `{kind:"rejected", error:{name:"UserQuestionError", message, code:"ASK_CANCELLED"}}`，四处调用点全覆盖；`/respond` 新增 `sessionId` 归属校验与 `validateQuestionAnswers` 结构校验（非法 400 且 pending 保留可重试）。
+- **修复 `/m/api/defaults` 静默提权**：改为与会话级路径同一守卫（`danger-full-access` 需 `confirmDanger===true`）+ preset 名白名单。
+- **修复 LAN 桥可被未鉴权请求崩溃**：不再把 `req.url` 原样拼进上游 URL（absolute-form 会同步抛 `ERR_INVALID_URL` → uncaughtException → 进程退出），改为正规解析 + 非 origin-form 直接 400。
+- **新增非 GET 跨站防护**：`Sec-Fetch-Site: cross-site|same-site` 或来源主机不在允许集（回环/本机网卡 IP/请求 Host/trustedHosts）→ 403；`Origin: null` 解析失败 fail-closed。App、curl、桌面原生客户端不受影响。
+- **修复浮动 promise 导致宿主退出**（`pushNotification` 未 await 未 catch → unhandled rejection 在宿主 fail-loud 下 = `exit(1)`）。
+- **修复持存队列"插队"静默丢消息**：会话无 live agent 时不再返回 200 却零投递，改为 409 `steer-unavailable` 并保留队列行。
+- **错误文本路径脱敏**：`/send`、`rpcError`、`/files`、`/directions` 等不再把内核原始 message（含主机绝对路径/cwd）回客户端；`pushContent: "standard"` 的推送正文同样脱敏。
+- **上传边界**：指定会话无法解析或会话无 cwd → 404（不再静默写进首个工作区根）；文件名黑名单补 `\0`。
+- **App 侧**：修复陈旧 agent 状态导致的"发送键变停止 / 消息被静默转排队"（bootstrap 改为全量权威重建）、详情按钮一旦加载成功即永久失效、调试模式 24 万字符原文进 `SelectableText`、缩略图全分辨率解码（OOM）、问询卡换人时的 null-check 崩溃、叠层场景取消问询静默失败。
+- **子代理面板行可点（#11 复核补正）**：会话工具 →「子代理」原来只是纯展示（行上没有 `onTap`），现在整行可点 → 跳进该子代理会话，右侧补箭头提示；走统一入口 `openChat`，**返回时恢复原会话**（与「分支」流程同款语义：顺路看一眼，不改主会话）。`showSessionToolsSheet` / `openChat` 增加仅测试用的 `apiClient` 注入位（与 `ChatScreen.apiClient` 同款，生产路径传 null 即用全局 `api`），并新增回归 `subagent_row_navigation_test.dart`（面板不切会话 → 点行切到子会话且推入会话页 → 返回恢复原会话）。
+- **SSE 事件流取消窗口的连接泄漏**：`eventsRaw()` 判不出「订阅已取消」—— Dart 的 `StreamController.isClosed` 只反映 `closed` 位、不反映 `canceled` 位（取消后仍为 false，且取消后的 `add()` 不抛错）。取消窗口内晚到的响应于是挂上一条**无人再取消**的响应流：连接永不释放、线性累积；服务端用 `connections.size` 做配额依据（`maxConnections` 默认 16），攒满后手机直接 `503 too-many-connections`，且服务端会误判「手机在线」（审批 fail-close 判据被污染）——症状就是「必须把 App 划掉重开」。修复为显式 `cancelled` 标志；真机触发路径：`resume()`（bootstrap 失败 / 旧流 >45s 无心跳）、`switchBase()` → `disposeBridge()`、`_reconfigure()`。
+- **新增 SSE 与 #13 回归测试 5 个文件**：假 SSE 宿主（`bufferOutput=false` + 帧推送 + 条件轮询 + 请求计数）、API 层收帧与分帧、store 连接态与分发、`turn/end` → 无回复条目 → 兜底补拉全量 `/api/history`、取消窗口残留连接（修复前 0/1/3 → 修复后 0/0/0）。
+- **排查澄清（#13）**：`/compact` 后首条回复丢失的修复本身没有问题 —— 此前端到端用例跑不通是**测试载体**限制：dart:io `HttpResponse.bufferOutput` 默认 `true` 时，<8KB 的 SSE 帧既不上线也不受显式 `await flush()` 影响（实测 298B/2990B → 0 字节，8990B → 8106B），所以「有时收不到帧」与帧体积相关；关掉该缓冲后三层用例全部稳定通过。
+- 真机复验范围（下个版本装机）：时间线卡片与模式切换、用量页与悬浮球区块、复制交互、休眠会话降级横幅、子代理/目标面板、问询取消/超时、审批链路。
+
+## v3.1.4（2026-09-16，issue #14 / #12 / #13）— 离线待答不再丢 + 任务面板 + 注入折叠 + 压缩后重同步
+
+> 范围：插件侧三项（离线待答、ntfy 标题、诊断补齐）+ App 侧四项（横滑误触发、注入消息折叠、任务面板、`/compact` 后重同步与轮次兜底）。
+> 版本：插件 `3.1.4` / App `3.1.4+21`。回归脚本：`tools/verify-issue14-p0.mjs`（mock 宿主，37 项断言）、`tools/verify-issue14-live.mjs`（真机一键验收）、`dsh-mobile-app/test/issue13_logic_test.dart`（兜底判定单测）。
+
+### issue #14 Bug2（同时是 Bug1 的真因）：手机离线时审批/问询帧被整个丢弃
+
+- **现象**：必须在审批发生前就停在那个会话里，手机上才会出现审批卡；事后打开 App 什么都没有（只能在电脑上处理）；App 关闭/被杀时收不到任何"需要你回答"提醒。
+- **根因**：`onEventsWaterfall` 第一行 `if (connections.size === 0) return;`（v3.1.3 第 3686 行）——手机没连就整段早退，于是 ① 待答**条目**不建、② 回放存储 `pendingFrames` 不写、③ 挂在同一函数里的 `needs-answer` **推送**也一起没了。而回放存储唯一的历史写入点在 `ctx.inject(["apiProxy"], …)` 的 mux 循环里，0.1.2-rc.1+ 内核已移除 apiProxy（实测 0.1.5-rc.2 全量搜 `apiProxy` 0 命中）→ 该通道是死代码，`pendingFrames` 永远是空 Map，`/api/events` 建连时的回放逻辑形同虚设。
+- **修复**：无论手机是否在线都建条目 + 写回放存储（`putAskReplay`，键 `a:<phoneId>` / `q:<phoneId>`，与 `/respond` 结算同源）；**只在手机在线时才 arm fail-close 超时**（离线时是桌面端在处理审批，不能被手机侧 120s 超时误杀），离线条目改走 `armOfflineReap`（30 分钟后**只清理、不结算**）；`holdApproval`/`holdQuestion`（mobile 接管路径）同样写入回放存储，接管期间断线重连也能拿回卡片。
+- **成对清理（报告人提醒的坑）**：`finishApproval`/`finishQuestion` 内统一 `dropAskReplay`，覆盖"手机先答 / 120s 超时 / ✕ 取消 / 桌面端先答（cancel 帧）/ 离线到期"五条路径——只修写入会出现"幽灵审批卡"（早已处理的请求被反复回放给 App）。
+- **关于推送归因**：报告人推测"`notifyNeedsAnswer` 的唯一调用点挂在 apiProxy 帧桥上"，实测不成立——`$events` 瀑布内（审批/问询两个分支）本就有推送调用，真正的拦路者就是上面那行早退；按他的建议"把推送搬到 $events 路径"会搬进同一个函数而依然收不到。
+
+### issue #14 Bug3：ntfy 标题丢失、正文变成一坨 JSON
+
+- **根因**：JSON payload 被 POST 到**主题地址**。ntfy 的 JSON 发布契约是 `POST /`（或自托管 base path 根）且 body 内带 `topic`；发到主题地址时服务端按**纯文本**处理整段 JSON。
+- **实测证据**：`POST https://ntfy.sh/<topic>` + `{"title":…,"message":…}` → 响应体无 `title` 字段、`message` 为 JSON 原文；改 `POST https://ntfy.sh/` + body 带 `topic` → `title` 正常返回。本机真实通道（微信 + ntfy）修复前的历史消息同样可见该症状。
+- **修复**：新增导出helper `ntfyPublish(url, payload)`（`lib/index.js` 模块级，单测友好）——解析配置里的主题地址，改为 POST 服务器根地址并在 body 内补 `topic`，兼容自托管带 base path 的部署（`https://host/ntfy/topic` → `POST https://host/ntfy/`）；schema 注释与实现口径统一（此前文档写 text/plain + X-Title）。配置写法不变。
+
+### issue #14 建议 6：诊断补齐可观测性
+
+- `checks.pendingFrames` 从"仅旧 apiProxy era 输出"改为**无条件输出**，并新增 `checks.pendingApprovals` / `checks.pendingQuestions`——现代内核下也能自查"离线时审批帧有没有被记下来"（正是本次排查现场）；App 诊断页对计数字段已有「✅ 0 / ⚠ >0」渲染，无需 App 改动。
+- 新增每通道最近一次投递结果 `checks.push:<通道名>`（`ok 21:04:33` / `fail 21:03:10 · HTTP 401: …` / `idle（尚未投递）`）——排障时不必再翻服务端日志确认"到底发没发出去"；事件推送与 `/api/push-test` 手动自检**两条入口都记录**（真机验收时正是它暴露了 Server酱通道当天额度已满：`fail · 超过当天的发送次数限制[5]`）。
+
+### issue #14（App 侧）：代码块 / 表格横滑误触发"加载更早"，列表跳回该轮上方
+
+- **根因**：`_onLiveScroll` 不区分滚动来源——代码块/表格内部的横向 `SingleChildScrollView` 会把 `pixels=0` 的通知**冒泡**给外层 `NotificationListener`，被误判成"滚到视觉顶部"→ 每次横滑都触发 `_loadMoreInfinite()`，列表前插旧内容、视觉跳回。
+- **修复**：加 `n.depth != 0`（忽略嵌套滚动）与 `n.metrics.axis != Axis.vertical`（只认纵向）两道过滤——与报告人给出的两行建议一致。
+
+### issue #12：系统注入消息改为**可折叠块**（不再当普通气泡铺屏）
+
+- **结构化判定（报告人建议的 `source` 路线）**：内核 `createUserMessage({ source })` 本就区分来源——真人 `kind: "user"`，注入为 `plugin` / `agent-instructions` / `tool` 等。插件 `summarizeEvent` 的 `user/message` 分支新增透出 `sourceKind`（旧内核无 source 则不下发该字段）。
+- **App 渲染**：`sourceKind` 非 `"user"` 的消息渲染成折叠块——一行摘要（类型标签 + 字数）、默认收起、点按展开；展开状态复用「思维链」同一套每消息覆盖存储（键前缀 `inj:`），列表回收重建不丢。原有 3 个关键词黑名单仍直接过滤（PC 端 GUI 也不显示的那三类）。
+- **效果**：技能目录、`[SCHEDULE REMINDER]`、压缩摘要、其它插件注入等不再以普通气泡占满屏幕。
+
+### 新功能：会话任务清单面板（对齐 PC 端「任务」面板）
+
+- **数据源与 PC 端同一处**：内核 `dsh-tool-todo` 把整份清单以 `todo/write` 快照写入会话事件，并注册会话投影 `todos`（投影语义：最新快照生效、`turn/start` 清空）。
+- **插件**：① `summarizeEvent` 新增 `todo/write` 分支（条数 ≤50、单条 ≤200 字符、status 白名单校验）；② 加入 `SURFACE_TYPES` → 历史补拉/重连回放也能拿到快照；③ 新增 `GET /m/api/todos?sessionId=`——直接读内核投影（`sessionProjections.stateOf(session, "todos")`），休眠/旧内核返回 `todos: null`。
+- **App**：输入框上方新增折叠面板——收起态一行计数（`1 进行中 · 3 待处理 · 4 已完成`），展开态完整清单（状态图标 + 完成项置灰）；实时靠 SSE `todo/write`/`turn/start` 折叠，打开会话/断线重连后用 `/api/todos` 对齐一次（历史只有 50 条窗口，投影读法保证长时间工具链之后仍然准确）。
+
+### issue #13：`/compact` 之后首条回复"消失"——真机未能复现 + 按报告人建议加两道兜底
+
+- **复现尝试（真机实时 + 历史两条路径，各两个会话）**：均未复现。逐条对账证明两端都正常——
+  - 插件侧：`/compact` 后的 `assistant/message` 确实广播了（`seq=44/64/83`，textLen 63/37/501…），`/api/history` 里也在；
+  - App 侧：事件被正常处理并渲染（`Chat: build itemCount` 16→19→21 递增），截图上压缩后的长回复（含表格、代码块、链接）完整显示。
+  - 另核实：`assistant/chunk` 在 0.1.5 内核里**不是会话事件**（不在 `known-event-types`），所以"流式草稿被 `turn/end` 清空"这条路径在当前内核下不可能发生。
+- **但借这次排查确认了两处真实隐患，并按报告人的排查建议 2/3 落地兜底**：
+  1. **压缩后按新表面重载**：`/compact` 以 `surfaceOp.replace` 重写会话表面，手机此前**不重载** → 继续显示已被 shadow 的旧消息（与桌面端视图分叉）。现在收到 `compaction/end` 立即 `_load(reset: true)` 按当前表面重建。
+  2. **轮次兜底补拉**（报告人建议 3）：`turn/end` 时若"本轮出现过真人提问、却没有渲染出更晚的回复条目"，判定内容被静默吞掉 → 补拉一次历史（10s 节流防抖；判定抽成纯函数 `needsTurnEndResync` 并带单测，见 `test/issue13_logic_test.dart`）。
+- 对方环境里的真因仍未定位（已请其提供 App 日志 `Chat: SSE 事件 <type> seq=` 片段）；本版两道兜底可让同类"静默丢内容"**自愈**。
+
+### 验证
+
+- `node tools/verify-issue14-p0.mjs`：mock 宿主内跑真实插件代码，**37 项断言全绿**——push-test 自检记账 / 离线记账 / 离线推送 / ntfy 请求形状（本地假 ntfy 断言 URL 与 body）/ 重连回放 / 手机应答清理 / 对端先答清理 / 离线期间不结算 / 问询同契约 / `todo/write` 摘要与 status 白名单 / `sourceKind` 注入标记 / `/api/todos` 端点（缺参 400、未激活 null、投影映射与截断）。
+- 真机端到端（LAN 桥 + Android 17 + App 3.1.3+20，2026-09-16）：杀掉 App（`mobileOnline=0`）→ 在新建会话里触发一次真实沙箱升级审批 → 诊断 `pendingApprovals=1 / pendingFrames=1`（旧版此处恒 0）→ ntfy 收到**带标题**的「⚠ 需要你回答 · a1bf1abb…a95b」→ 重开 App 出现回放审批卡 → 手机点「允许一次」→ 诊断归零、工具真的执行（探针文件写入成功）；审批在手机离线状态下挂起 **>120s 未被 fail-close**（桌面端流程不受手机侧超时干扰）。见证脚本：`tools/verify-issue14-live.mjs`。
+- App 3.1.4+21 真机：任务面板 / 注入折叠 / 横滑不跳 三项截图与 logcat 逐项核对（详见 issue #14 / #12 回复）。
+- issue #13 兜底（App 3.1.4+21 真机）：实时 `/compact` 后 App 日志出现「压缩完成 → 按新表面重载会话」+「重同步会话（按新表面重载）」并按新表面重建条目；正常轮次**不触发**兜底（无「轮次结束但无回复条目」日志），回复照常渲染；`flutter test` **28/28**（含 `needsTurnEndResync` 4 项）。
+
+### 升级与验证（真机）
+
+1. 电脑端：更新插件包（`dsh-mobile-remote-v3.1.4.tgz`）后**重启 DSH**（LAN 桥持有监听，不建议热重载）。
+2. 手机端：安装 `DSH-Remote-v3.1.4.apk`（覆盖安装，登录态与数据保留）。
+3. 验收：`POST /m/api/push-test`（设置 → 通知 → 发送测试通知）→ ntfy 收到的通知**应有标题**；随后关闭 App → 在电脑端触发一次需要审批的操作 → ntfy 应收到「⚠ 需要你回答」标题的推送，重新打开 App 应看到审批卡并可作答；诊断页 `pendingFrames` / `pendingApprovals` 应随状态归零（不留幽灵卡）；会话里跑一次长任务（agent 会调 `todo_write`）→ 输入框上方出现「任务」计数条，点开可看清单。
+
+## v3.1.3（2026-09-08，issue #9）— 审批/问询双端呈现（`approvalMode: both` 默认）+ 可配置策略
+
+### issue #9：手机 App 在线时桌面端不再弹出审批/问询框（approval/request 被 prepend 接管短路）
+
+- **现象**：v3.1.2 起（内核 0.1.2-rc.1 审批决策改为单条 Cordis 瀑布），answerer 以 `ctx.on("approval/request", …, { prepend: true, global: true })` 注册——手机在线（SSE `connections.size > 0`）即接管并挂起 promise（120s）且不调用 `next()` → 排在其后的内核"转发桌面 GUI"监听（`dsh-api-remotes` → `$events` 远程事件）不执行 → PC 端不弹卡。手机独占与桌面呈现互斥，桌面用户无法在 PC 审批，只能等手机答或 120s 后 fail-close `unavailable`（issue 报告含源码级技术分析）。
+- **修复思路（插件侧，无内核改动）**：0.1.2 的桌面弹卡并不在瀑布监听内联完成——`dsh-api-remotes` 把两个 Agent 作用域瀑布（`approval/request`、`user-questions/request`）继续转成 typertGateway 的 **$events 远程事件广播**：每个 $events 客户端（桌面 GUI 是其一）收到同一事件副本，**任一客户端先回 `$events/result` 即结算**（`settleRemoteEvent`），其余客户端收 **cancel 帧自动收卡**（`finishRemoteEvent`）。因此瀑布监听者只要**不抢先消费（next() 放行）**，审批/问询就会广播到桌面 GUI 与本插件各自的 $events 客户端——插件在 `both` 模式下再挂一个**进程内 $events 客户端**（`ctx.typertGateway.openWireStream("$events")`），即可恢复 v3.1.1 帧桥"两端同显、任一端先答即生效"。
+- **新增配置 `approvalMode`（`lib/index.js` schema，cordis.patch.yml 配置，重启生效）**：
+  - `both`（**默认**）——桌面 GUI 与手机同时收到审批/问询待办，先答生效、另一端自动收卡。需 DSH 0.1.2-rc.1+ / 桌面 v2.0.5+（$events 通道）；旧宿主自动降级 `mobile`（启动日志 + 诊断 notes 说明）；
+  - `mobile`——v3.1.2 行为：手机在线即由手机独占应答，离线 `next()` 交桌面 GUI（外出远程用）；
+  - `desktop`——一律 `next()` 交桌面 GUI，手机不弹审批/问询卡（常驻电脑前用）。
+- **双端结算语义**：手机在场时待办 120s 无应答 fail-close（审批 → `unavailable`、问询 → 跳过 null，与 v3.1.2 一致）；任一端口答/超时/取消都会广播 resolved 帧——**其它手机端卡片同步收起**（v3.1.2 只结算不广播，超时/多手机时卡片残留）。
+- **`/m/api/respond` 增强（顺手修复 v3.1.2 遗留缺陷）**：① question/approval 条目支持按 `rpcId` 兜底匹配——修复 **v3.1.2 的 question 应答必失败**（App 端只回传 rpcId 不回传 questionId，原查找 miss → 走 apiProxy 降级 → 现代内核 503，问询只能在桌面答）；② `kind=cancel` 在现代宿主下结算本地条目（审批 → `cancelled`、问询 → 跳过；v3.1.2 取消悬空、只能等 120s 超时）；③ 结算统一广播 resolved 帧（见上）。
+- **诊断**：`checks.approvalMode`（生效策略）+ `checks.remoteEvents`（$events 双端通道就绪与否）+ `notes` 首行策略说明；both 降级 / desktop 配置均有明确提示。
+- **兼容性**：App 协议零破坏（帧只增字段：requested 帧新增 `rpcId`，resolved 帧新增 `rpcId`/`questionId` 冗余字段，旧 App 按 key 取用、忽略未知字段）；旧内核（0.1.1-rc.2 及更早）走 apiProxy 帧桥路径不受影响（era 互斥：0.1.2+ 无 apiProxy、旧内核无瀑布/$events，运行时分别探测）。App 侧小改（3.1.3+18）：设置 → 环境诊断支持字符串字段与 notes 渲染（v3.1.3 前字符串行会按布尔误显示 ❌）。
+
+### 其余
+
+- **修复（真机验证发现，v3.1.2 遗留）**：问询 `questions` 取值路径错误——内核瀑布值为**顶层 `questions`**（`userQuestions.ask` 传 `{questions, agent, signal}`，桌面 GUI `$on` 亦读 `request.questions`），插件接管与双端广播误取 `req.request.questions` → 手机端 `question/requested` 携带空问题列表，**手机问询在 v3.1.2 不可用**（与 `/respond` 缺 questionId 并列的第二根因）。修复：`holdQuestion` 与 `onEventsWaterfall` 两处改读 `questions`（`lib/index.js`）。
+- **修复（桌面端插件树加载崩溃）**：`approvalMode` schema 改用 schemastery `union`/`const` 表达——`z.enum` 不是 `@deepseek-ai/schemastery` 的 API（宿主桌面 v2.0.5 提供的 3.18.2 无此方法），此前桌面端加载插件树即抛 `TypeError: z.enum is not a function` 导致整树失败；改为 `z.union([z.const("both"), z.const("mobile"), z.const("desktop")]).default("both")`，语义（三值集合 + `both` 默认 + 非法值拒绝）与原意图一致。
+- **修复（真机验证发现，诊断显示）**：`runtime.form` 判定——桌面启动器未给插件进程置 `DSH_DESKTOP=1`，桌面版恒显示 `cli` 误导诊断；改以 `desktopBrowserAccess` 服务探测兜底（仅桌面版 v2.0.5+ 提供，与 LAN 桥同源判定），桌面版正确显示 `desktop`（新增顶层助手 `runtimeForm(ctx)`）。
+- **诊断精简（用户反馈）**：`services.apiProxy` / `checks.respondBridge` / `checks.frameBridge` / `checks.pendingFrames` 是 0.1.1-rc.2 及更早内核（apiProxy 帧桥 era）的探测项——0.1.2-rc.1+ 内核无 apiProxy，此前恒 ❌ 徒增噪音；v3.1.3 起**仅在帧桥实际激活时输出**，现代宿主不再显示（审批/问询状态看 `checks.approvalMode` / `checks.remoteEvents`），FAQ/docs/09 措辞同步。
+- **诊断可读化（用户反馈，App 3.1.3+19）**：设置 → 环境诊断的服务/端点实测项改为「中文名（英文 key）」显示——`approvalMode` 带取值说明（both · 双端同卡，先答生效 / mobile · 手机在线独占 / desktop · 仅桌面 GUI）、`remoteEvents` 等新字段有中文名、挂起待办非 0 时附语义提示；英文 key 保留便于复制粘贴排障。旧版 App（≤3.1.2）无此展示（字符串行按布尔误显示 ❌ 属显示限制，以插件日志/诊断 JSON 为准）。
+- **实时计数指标（用户反馈，服务端 + App 3.1.3+20）**：`/m/api/diagnostics` 新增 `runtime.metrics`——手机在线连接数（SSE）/ 运行中 Agent / 会话数 / 工作区数 / 推送通道数，替代早期恒真的占位探测（`sessionsList ≥0` 等永远 ✅ 的检查已不再输出）；App 诊断页新增「实时指标」区展示；旧版 App 忽略新字段（协议只加不减）。
+- 审批/问询 answerer 常量收敛（`PENDING_TIMEOUT_MS` = 120s）；超时定时器 `unref`（卸载不再残留句柄）。
+- 文档同步：README（功能/配置说明/dsh 版本基线）、FAQ（问询/审批弹窗类新增 issue #9 问答与 approvalMode 配置示例）、docs/09（§1 基线、§2.1 服务/机制表 + approvalMode 语义说明、§5 已知问题 12/13、§6 配置项）。
+
+### 真机验证（2026-09-08 深夜，DSH Desktop 2.0.5 / 手机 Xiaomi 2509FPN0BC，App 3.1.2+17，LAN 桥）
+
+| 场景 | 操作 | 结果 |
+|---|---|---|
+| 审批双端·手机先答 | 合成审批 → 两端同弹 → 手机「允许一次」 | `allowed-once`；桌面卡自动消失 ✅ |
+| 审批双端·桌面先答 | 同上 → 桌面「允许一次」 | `allowed-once`；手机卡自动消失 ✅ |
+| 问询双端·手机先答 | ask_user_question → 两端同弹 → 手机回答 | 答案经 `$events/result` 返回；桌面面板自动收起 ✅ |
+| 问询双端·桌面先答 | 同上 → 桌面回答 | 手机问询框自动收起 ✅ |
+| `mobile` 模式 | 审批/问询仅手机弹（桌面不弹）+ 手机应答 | ✅（approvalMode 切换 + 重启生效） |
+| `mobile` 超时 | 手机在线不答 → 恰好 120s | `unavailable` fail-close ✅（手机卡自动收起） |
+| `desktop` 模式 | 审批/问询仅桌面弹（手机不弹）+ 桌面应答 | ✅ |
+| 取消路径 | 双端同弹 → 手机点 ✕ | `cancelled`；桌面卡自动收起 ✅ |
+
+测试中发现并记录的边界：桌面 GUI 单「composer 待办槽」——审批卡悬置时若另一 pending 交互（问询）到达，会顶掉审批卡（客户端 UI 行为，非插件缺陷；真实使用中 agent 串行问询不并发）。
+
+## v3.1.2（2026-09-05）— 新建会话权限死锁修复（issue #6）+ 宿主包 peer 化（issue #7）
+
+### issue #6：默认权限预设为「完全访问」时，手机端新建会话必失败（risk-confirmation-required）
+
+- **现象**：设置页把默认权限预设设为 danger-full-access（该路径已带风险确认并成功保存）后，首页「新建会话」必失败——服务端 `lib/index.js:1753` 在建会话前校验 `confirmDanger !== true` 即返回 400，而 App 端 `doCreate` 只传 `permissionPreset`（跟随默认预设）、不传 `confirmDanger`，新建会话弹层也没有权限预设选择/风险确认入口 → 死锁：默认预设设成完全访问后，手机端永远无法新建会话。
+- **App（Flutter，3.1.2+17）**（`dsh-mobile-app/lib/screens/sheets.dart`）：
+  - 新建会话弹层新增「权限预设」行：默认跟随设置页默认预设；可逐项选择（danger 先过风险确认弹层，与设置页一致）；
+  - `doCreate` 兜底：目标预设为 danger-full-access 且未经本弹层确认时，先弹风险确认；确认后请求体显式带 `confirmDanger: true`；取消则终止创建（不再出现 400 死锁）；
+  - 风险确认弹层重构为可复用 `_askDangerConfirm`（返回 `Future<bool?>`），设置页路径（`showPermSheet → _showDangerConfirm`）行为不变（取消回权限列表、确认后 `applySessionConfig` 不变）。
+- 服务端无改动：契约本就要求显式 `confirmDanger`（docs/03-api §创建会话），App 侧对齐即可。
+
+### issue #7：精确钉版 @deepseek-ai/* 共享宿主包 → 双实例（dual-package hazard）
+
+- `package.json`：`@deepseek-ai/dsh-llm` / `dsh-credentials` / `dsh-sandbox-policy` 从 `dependencies`（精确 `0.1.0-rc.6`）移至 `peerDependencies`（`>=0.1.0-rc.6 <0.2.0`）；
+- `@deepseek-ai/schemastery` 一并 peer 化（`>=3.18.1`）：宿主 0.1.2-rc.1 已是 3.18.2，原精确 `3.18.1` 已过期（与宿主版本分叉）；
+- 效果：安装后不再在 profile 内产生并存第二份副本，Node 模块解析上溯宿主 bundle（插件 `~/.dsh/profiles/<profile>/node_modules/` → 宿主 `~/.dsh/profiles/node_modules/`），版本与宿主一致，双实例从根上消除；插件市场「可能遮蔽宿主版本」警告随声明方式修正而消失。
+- 验证：`pnpm install` 后插件 node_modules 无 `@deepseek-ai` 副本、无 `0.1.0-rc.6` 残留；`require.resolve` 命中宿主 0.1.2-rc.1；`dsh plugin list` 正常。
+
+### 兼容性
+
+- 适配/验证组合：DSH 0.1.2-rc.1（DSH Desktop v2.0.5）——插件加载、LAN 桥（`0.0.0.0:3080 → 127.0.0.1:43120/m/api`）与口令认证均正常（`flutter analyze` 零问题，App 单测 24/24，`node --check` 通过）。
+- **DSH Desktop 2.0.5 浏览器门禁适配（真机调试发现）**：2.0.5 给桌面 WebServer 每个路由包了一层 desktop-browser-access 门禁——默认只放行带 `x-dsh-desktop-renderer` 能力头的 Electron 渲染器请求，手机经 LAN 桥的请求（即使 `x-mobile-token` 正确）一律 `403 forbidden`（`dsh-plugin-desktop/lib/webserver.js` → `decideDesktopBrowserAccess`）。修复：桥转发上游时，若同上下文存在 `ctx.desktopBrowserAccess`（桌面启动器提供），补传其 `rendererHeader`；桥的 LAN 面仍由插件 authToken（≥16 位）把关，不依赖「允许浏览器打开」设置，web profile/旧版桌面自动跳过。
+- **0.1.2-rc.1 RPC 网关适配（`lib/index.js` apiRpc 重构）**：0.1.2-rc.1 起内核 RPC 契约变化——①端点命名 `namespace.method` → `namespace/method`（`session.models`→`session/modelCatalog`、`session.history`→`session/control`、`goal.create`→`goals/create`、`subagent.*`→`subagents/*`）；②载荷按新参数形态适配（多数端点收单参数 `request`，`subagents/interruptByParent` 三参数平铺，`session/modelCatalog`/`session/control` 零参数，`goals/create` 为 `agent`+`request`，`session/prompt` 需补 `requestId`）；③桌面 2.0.5 后 `/api` HTTP 通道被浏览器门禁+会话 Cookie 鉴权关闭，插件内 fetch 必 403——统一改走进程内 `ctx.typertGateway.invokeRpc`（@Remote 网关，与宿主同域），旧宿主无网关时保留原 HTTP 路径降级。`readSessionConfig`/图像限额改读 `session/control` 投影（`modelSelection.lastUsed` / `imageLimits`），模型目录改读 `session/modelCatalog`（`groups` 结构不变）。
+- 注：DSH Desktop 采用 pnpm `nodeLinker: hoisted`，file: 插件是**物理拷贝**——改源码后必须 `pnpm install --force` 同步到 `~/.dsh/profiles/<profile>/node_modules/` 并重启生效。
+- **0.1.2 Session API 变更适配（真机定位）**：0.1.2 的 `Session` 类不再暴露 `.events` 数组，改用 `snapshotEvents()`/`eventAt()`/`seq`；`PermissionPresetService.current()` 也改为接收 session 对象（不再接受事件数组）。插件所有 `session.events` 访问点（`/history`、`sessionTitleOf`、`foldAgentPreset`、`readSessionConfig`、`/usage`）统一收敛到新增 `eventsOf(session)` 助手（兼容休眠快照 `{events}` 形态与旧版宿主），修复 App 打开会话「该会话暂不可用」与 `Cannot read properties of undefined (reading 'length'/'filter')` 崩溃。
+- **审批/问询移动端 answerer（0.1.2 机制再适配）**：0.1.2 移除了 apiProxy（旧帧桥失效，手机收不到审批卡）；内核改为 Agent 作用域 Cordis 瀑布 `approval/request` / `user-questions/request`，answerer 须以 `global: true` 注册（dispatch 从宿主服务的 fiber 分发并做 agent 作用域过滤，非 global 的根监听不入选）。插件注册 `{ prepend: true, global: true }` 监听：手机在线（SSE）即接管（转发 `mobile/frame` + `/respond` 结算），离线/超时 fail-close（`unavailable`，与内核一致），拒接 `next()` 落回桌面 GUI answerer。与官方 `packages/api/remotes` + `packages/client/ui-approval` 同形态（已对照 deepseek-ai/deepseek-harness dsh-v0.1.2-rc.1 源码逐行验证）。
+- **休眠会话自动恢复**：`/send` 遇到休眠会话（桌面重启后）调用 `agents.resume({ resumeSessionId, agentOptions, setup })` 自动重挂 agent（先前必 404 session-not-found）；`readSessionConfig` 对休眠会话从日志折叠配置（`model/selection`、`agent-preset/selected`、`permission/preset`），修复重启后聊天页「模型/权限」标签为空。
+- **合成审批测试端点**：`POST /m/api/dev/approval-test`（需口令）——复用内核同款 Agent 作用域瀑布（`scopeTarget(agent, agent)`），绕过 turn-enclosed 校验，用于不依赖模型行为的审批链路验证（手机接卡 → 批准/拒绝 → `/respond` 结算 → 瀑布返回 outcome）。新增 peer：`@deepseek-ai/dsh-scope`。
+- **B站反馈落地**：
+  - **文件传输（csborbbnc 反馈）**：服务端新增 `GET /m/api/files?path=`（下载，流式+Content-Disposition，MIME 按扩展名）与 `POST /m/api/files/upload`（{sessionId, name, data base64} → 写入会话工作目录，64MB 上限；与目录选择器同信任模型：口令鉴权+现有限流）；App 端 composer「⊕ 更多」新增「上传文件」（Android 系统文件选择器，原生通道 `dsh/files`）与「下载文件」（输入电脑路径 → 保存到手机「下载」目录，Android 10+ MediaStore、更早版本应用下载目录，零新依赖）。
+  - **自由复制（csborbbnc 反馈）**：消息文本本已支持选中复制/操作栏复制——本次补齐**代码块复制按钮**（复制全文 + 行数提示）。
+  - **干活完提醒可靠性（小小的甜菜 反馈）**：推送超时 10s→15s，并对网络层失败（DNS 抖动/连接重置等）重试一次（HTTP 4xx/5xx 不重试，避免配额错误空转）。
+  - **微信/IM 提醒通道（v3.1.2 第二波）**：新增**企业微信群机器人 Webhook**推送格式（`format: wecom`，国内稳定、免登录态、约 20 条/分钟限额）；新增「**发送测试通知**」（App 设置 → 通知 + `POST /m/api/push-test`——逐通道验证、绕过节流，配置后一键确认通不通）；docs/06 §6 通道推荐重构（企业微信机器人 / Server酱 / Bark；ntfy.sh 境内不可直连警示）；docs/07 FAQ Q4 补充验证步骤；README 新增「微信入口（可选）：dsh-im」推荐章节（IM 对话入口与本插件互补：dsh-im 管对话、本插件管控制台+提醒）。
+
+## v3.1.1（2026-08-26）— WSL/类 Unix 平台路径选择修复（issue #5）
+
+### 现象
+- GitHub issue #5：服务端运行在 WSL（dsh 跑在 Linux 侧）时，移动端「新建会话 → 工作目录」无法正确选择路径——从根目录 `/` 进入 `home` 会拼成 `/\home`，随后报「读取失败」（服务端 `readdir` ENOENT），后面的目录全部无法浏览/选择。
+
+### 根因
+- 目录选择器按 Windows 习惯硬编码 `\` 拼接子目录（`_openDir`），服务端为 POSIX 时 `/\home` 是非法路径；
+- 深一层：工作区路径在 App 侧被 `_normPath` 全量归一成 `\home\user` 形态——WSL 上该形态会被直接当作 cwd 发回服务端（建会话目录不存在），工作区列表展示的也是 `\` 形态（与 PC 端观感不一致）。
+
+### 服务端（lib/index.js）
+- `GET /m/api/directories` 根视图响应新增 `sep` 字段（服务端真实路径分隔符，纯增量，旧版 App 忽略即可）；
+- 新增 `normalizeServerPath`：目录浏览/新建文件夹/建会话 `cwd` 的路径参数按当前平台归一化分隔符（POSIX `\`→`/`，Windows `/`→`\`）——旧版 App 在 WSL 上拼出的 `/\home` 也能命中真实目录（兼容矩阵「插件新 + App 旧」成立）。
+
+### App（Flutter，3.1.1+16）
+- 目录选择器：新增 `joinDirPath`/`dirSepOf` 纯函数，按服务端 `sep` 拼接子目录（WSL `/`、Windows `\`），根视图文案与分组标题随之自适应（「根目录」/「所有盘符」）；
+- 工作区列表：条目保留服务端原始路径（展示与 cwd 回传用原始形态），规范化只用于匹配比较——`refreshWorkspaces`、主界面工作区弹层、会话页筛选、新建会话默认目录四处同步；
+- 新建会话默认目录：匹配改为规范化比较，不再把归一形态当作 cwd 发送。
+
+### 测试
+- `flutter test test/dirpicker_logic_test.dart`（新增 6 例：joinDirPath 两种分隔符/根视图、dirSepOf 服务端优先/根视图推断/兜底）；
+- `tools/wsl-path-check.mjs`（新增：normalizeServerPath POSIX/Windows/非字符串，8/8 通过；注：`/\home` 归一为 `//home`，POSIX 下与 `/home` 等价）；
+- `flutter analyze` 零问题、`node --check` 通过。
+
+### 生效
+- 服务端改动随 DSH 重启生效（旧版 App 即可获得 WSL 浏览修复）；App 修复随新 APK（3.1.1+16）生效。
+
+## v3.1.0（2026-08-25）— 思维链折叠 + 流式滚动跟随修复 + 悬浮球会话标题（社区 PR #4，marktrue-ahu）
+
+### App（Flutter）
+- 对话页新增「思维链折叠」：assistant 回复携带思维链正文时，正文上方渲染可折叠「思维链」块（图标 + 字数 + 箭头，点按展开/收起）；单个消息独立切换。
+- 设置 → 显示 新增「思维链默认展开」开关（持久化，默认关=折叠），控制思维链块的默认展开状态。
+- 修复流式输出不跟随滚动到底的问题：按「停留底部」钉住状态决定自动跟随，替代与增长中的 maxScrollExtent 比距离，大段 chunk 单帧推高内容后不再掉队。
+- 悬浮球「运行中的会话」改展示会话标题（超宽省略号截断），替代 session id 短码。
+
+### 服务端（lib/index.js）
+- `assistant/message` 摘要新增 `reasoning` 字段（思维链正文，仅非空时下发，≤20000 字符），供移动端折叠块使用；历史与 SSE 同步生效。
+- `/api/bootstrap` 的 agents/sessions 新增 `title` 字段（会话标题，空则兜底短码），供悬浮球「运行中会话」展示标题。
+
+### 审核中发现并修复（维护者）
+- **思维链折叠状态丢失**：手动折叠后，列表滚动回收/退出重进/重启会恢复默认展开。修复：折叠状态上移 AppStore 按会话+消息持久化（prefs，每会话 100 条 + 全局 500 条软上限）。
+- **新建会话缺模型崩溃**：`POST /sessions` 不传 model 时首轮报 `{{model}}` 组装无值。修复：无显式 model（含仅传 reasoningEffort）统一绑定内核默认模型；失败时 `handle.dispose` 拆除会话并明确报错。
+- **技能目录不注入**：插件建会话漏传 `setup`（预设组装挂载），与 PC 端 `session.create` 契约不一致。修复：`agentPresets.resolve` + `mount` 挂载，技能目录恢复注入；resolve 失败硬拒绝。
+- 模型探测报错可操作化（401/403、断连、404 中文引导）；模型提供商页新增已存密钥提示与官方 DeepSeek「内置可用」标识。
+- 诊断接口新增 notes（技能目录状态披露）；`clampText` 截断提示计入上限（输出严格 ≤ max）。
+- docs/05 新增 F-20~F-22 用例；docs/09 补充字段级兼容与降级说明。
+
+## v3.0.0（2026-08-22）— LAN 桥：桌面版局域网直连（无需穿透）（二次 Code Review 落实集成于本版本内）
+
+### 图像发送 64KB 误限修复（2026-08-23 热修）
+- **根因**：`readJson(req, res, limit)` 从不接受第三个参数——`/send` 传入的 `64 * 1024 * 1024` 被静默丢弃，实际按 `readBody` 默认 **64KB** 计；图片 base64 一旦超过 64KB（≈48KB 原图，任何真实照片都超）即触发 `req.destroy()`，响应发不出去——手机端表现为「Connection reset by peer (errno 104)」；经 LAN 桥时桥把上游断连转成 502「upstream webserver unreachable」。
+- **修复**：`readJson` 接受并透传 `limit`（其余 20 处调用不变，仍 64KB）；`/send` 增加 `content-length` 预检——声明超 64MB 直接回 `413 payload-too-large` JSON（桥可透传），不再让客户端只看到 RST/502 拿不到原因；无 content-length 时仍由 `readBody` 流式兜底。
+- **验证**：140KB 图片 payload 实测——修复前桥返回 502「upstream webserver unreachable」；修复后正常解析进 `/send` 语义（agent 不存在 → `404 session-not-found` JSON）。App 端无需改动（服务端热修，无需重装 APK）。
+
+### 图像发送两个误报修复（2026-08-23 热修 02）
+- **「发送未被接受」误报**：插件图片路径（steer/running 持存/idle 三处）的 200 响应缺 `accepted` 字段，App 端 `r['accepted']==null` → 误弹「发送未被接受」（其实图片已发出，用户以为没发出会重复发送）。修复：图片路径响应补 `accepted: true`；文本路径不受影响。
+- **「Declared image type does not match its bytes」**：App 按**文件扩展名**声明 mediaType，微信/浏览器保存的图片常是 WebP 顶 `.jpg/.png` 名字，与真实字节不符 → 内核字节校验拒绝。修复（双保险）：
+  - 服务端 `/send`：对每张图片按字节魔数（PNG/JPEG/GIF/WebP/HEIC）嗅探真实类型，声明不符**自动纠正**（warn 记录），未识别原样交内核裁决；
+  - App `_sendImages`：发送前按字节嗅探（扩展名只作兜底），嗅到白名单外类型（如 HEIC）给出明确「不支持的图片格式」提示（随下个 APK 版本生效）。
+- **验证**：嗅探器单元验证——PNG/JPEG/WebP 前缀识别正确、jpg 名 WebP 字节纠正为 webp、随机字节返回 null；服务端热修随 DSH 重启生效，App 侧修复随下个 APK 生效。
+- **限额兜底偏差**：插件 `imageLimitsDefaults.maxMessageImageBytes` 误写 20MB（内核默认 `DEFAULT_MAX_MESSAGE_IMAGE_BYTES = 200MB`），内核 projection 取不到时 App 端总大小会被错误限制在单张额度；已修正为 200MB，App `_sendImages` 兜底同步（下个 APK 生效）。
+
+### App 图像发送 UI 两处修复（2026-08-23 热修 03，App 3.0.0+6）
+- **气泡图片"显示不全"**：气泡高度按 `(236/ratio).clamp(80, 236)` 计算——竖图（比例≈0.46）被压成 236×236 方形，再配合 `BoxFit.cover` → 只显示图片中间一条（点开全屏才全）。修复：比例上限放宽到 0.3~3.0、高度上限 480，渲染改 `BoxFit.contain`——竖图完整显示，不再裁切。
+- **图+文发送后输入框文字残留**：文本路径有 `_inputCtrl.clear()`，图片路径 `_sendImages` 发送成功（含排队持存）后未清空输入框——用户误以为没发出去会重复点发送。修复：accepted 后清空（仅当输入框文字未改动时）。
+
+### 发送失败误报与连接复用竞态修复（2026-08-23 热修 04，App 3.0.0+8）
+- **现象**：手机发「图片+文字」，会话里消息已出现、agent 已开始应答，但 App 弹「发送失败：Connection reset by peer」，且输入框文字与图片残留——用户会误以为没发出而重复发送。
+- **根因两层**：
+  1. **App 把「传输层报错」等同于「未送达」**：`/send` 是「服务器收到后才回包」的模型，reset 若发生在响应回程，消息实际已入会话；`_sendImages`/`_send` 的 catch 一律报失败并保留/丢弃草稿，无法区分（已实测复现：服务端 `/send hit` 正常、消息入会话、agent 应答，客户端仍报失败）。
+  2. **keep-alive 复用竞态（reset 的主要来源）**：手机 dart:io 连接池 idle 15s 与 Node 服务端 keep-alive 5s 存在半关复用窗口，复用已关 socket 即表现为 reset；LAN 桥还透传上游 keep-alive 响应头并复用上游连接，把竞态窗口又放大了两层。
+- **修复**：
+  - App：发送失败后**对账**（history 近 20 条 user/message 文本+图片数匹配，或队列同文本行）——已送达则清空草稿并提示「已送达：刚才网络波动，请勿重复发送」；真未送达才保留草稿（文本路径恢复输入框、撤回乐观气泡）供重试；`history`/`queue` 支持自定义超时（对账 8s，避免断网时久等）。
+  - 服务端：所有 JSON 响应与 `/attachment` 强制 `connection: close`（SSE 除外）——关闭复用竞态窗口；LAN 桥禁用上游连接池（`agent: false`）、响应头强制 close（SSE 保持 keep-alive）；桥 upstream 错误路径补 warn 日志（此前 reset/销毁全静默，排障无迹可查）。
+- **验证**：本机经桥同构重放（2 图 1.26MB + 文本）200/0.48s——服务端链路健康，问题在响应回程与客户端判定；`node --check` 与 `flutter analyze` 通过；服务端修复随 DSH 重启生效，App 修复随下个 APK（3.0.0+8）生效。
+
+### Codex 复审 P2 修复（2026-08-24 热修 08，App 3.0.0+14）
+- **P2-1 认证/限流等确定性错误不再走"结果未知"回执流程**：`isDefinitiveSendRejection` 白名单补充投递前明确拒绝的 5 个错误码——`auth-required`（401）、`rate-limited`（429）、`host-not-allowed`（403）、`loopback-only`（403）、`method-not-allowed`（405）。命中即判失败并保留草稿；`bridge-unavailable`/`receipt-pending`/网络 reset/超时仍走回执对账（已有测试锁定）。
+- **P2-2 回执 TTL 全量清理**：新增顶层纯函数 `pruneReceiptMap`（TTL+上限全量清理、返回是否有删除；恰好 TTL 边界不算过期）；`/send` 查重前与 `/send-receipt` 查询前调用 `pruneReceipts()`，有变化才 `persistReceipts()`——未访问的旧回执同样被清理，不再滞留内存与 JSON 文件。
+- **测试**：`test/hotfix07_logic_test.dart` 新增认证/限流/Host 拒绝 5 例（18/18 通过）；`tools/hotfix07-unit-check.mjs` 新增 pruneReceiptMap 4 例（清过期/保边界/返回标志/上限裁剪，14/14 通过）；`flutter analyze` 零问题、`node --check` 通过。
+- **验证**：DSH 重启加载新插件后 `DSH_MOBILE_REMOTE_DROP_RESPONSE=1` 钩子场景真机验证（文本/纯图片 → 回程断开 → 回执 `done`、同 requestId 不重复投递）；关闭钩子后正常发送验证。requestId 主流程、40MB 上限、图文渲染均未改动。
+
+### Codex review 修复（2026-08-24 热修 07，App 3.0.0+12）
+- **P1 发送异常不覆盖新输入**：`_send` 三处异常恢复改为 `_restoreDraftIfUntouched`——仅当输入框仍为空（本次发送清空后的预期状态）才回填旧草稿；发送期间用户已输入新内容一律保留。顶层纯函数 `draftAfterFailure` 供单测。
+- **P2 回执 TTL 读取时生效**：`receiptExpired` 顶层纯函数（默认 15 分钟）；`/send` 查重前与 `/send-receipt` 查询前清理过期回执并持久化——服务闲置 15 分钟后旧回执不再被命中，与文档一致。
+- **P2 签名纳入发送语义**：`composerSignature(sessionId, mode, text, imagePaths)` 替代旧签名（会话+最终生效模式+文本+图片路径）；`steer` 空闲降级提前到图文分流之前——排队结果未知后改用插队会获得**新 requestId**，插队真正执行而非回放旧排队结果。
+- **P2 不误删用户手打 `[图片]`**：占位移除改在**服务端**——`blocksToText` 增加 `imagePlaceholder` 开关，`user/message` 摘要以 `imagePlaceholder:false` 生成文本（图由 `images[]` 图卡渲染）；客户端剥离逻辑整体移除，用户原文原样保留。旧会话历史即时按新规则（`/history` 实时重摘要）。
+- **测试**：`tools/hotfix07-unit-check.mjs` 10/10（占位开关/手打保留/images 元数据/TTL 边界）；`test/hotfix07_logic_test.dart`（草稿恢复决策 + 签名差异 + 明确拒绝白名单 2 例）；`flutter analyze` 零问题、`flutter test` 17/17、`node --check` 通过。
+- **修正（+13）——桥 502 不误判定失败**：DROP_RESPONSE 真机验收发现——服务端处理完才切断回程，桥会把该切断翻译成 `502 bridge-unavailable` 返回；原代码把**所有** `ApiException`（除 receipt-pending）当"明确拒绝"，导致这种"服务端已接收但回程断开"被误报失败、不回执对账。新增 `isDefinitiveSendRejection` 错误码白名单（empty-text/payload-too-large/session-not-found/send-failed/attachment-error/invalid-requestId/bad-request/not-found/no-live-agent/agents-unavailable），仅命中才判失败；其余（bridge-unavailable/receipt-pending/传输层）一律走回执对账 → 弹「已送达，请勿重复发送」。
+- **生效边界**：服务端改动随 DSH 重启生效；`64110b3`（requestId 校验顺序）与本次一起在重启后上线；App 修复随 APK 3.0.0+13。
+
+### 用户消息图文顺序对齐 PC 端（2026-08-23 热修 06，App 3.0.0+10；修正 +11）
+- **现象**：移动端用户气泡先文本、后图片，且文本里带服务端为 image 块生成的「[图片]」占位行（`blocksToText`）；PC 端是**图片卡片在前、文本在后，且无占位**——移动端与 PC 观感不一致、占位与图卡重复。
+- **修复**（纯展示层，协议零改动）：用户气泡重排为 `_ImagesGrid` 在前、`Text` 在后；带图时剥掉独立成行的「[图片]」占位（真实图由图卡渲染），无图消息文本原样（不误删用户手打的 [图片]），纯图消息只剩图卡。服务端不动（占位在队列预览等上下文仍有价值）。
+- **修正（+11）**：对照 PC 实际样式进一步对齐——图卡与文本改为**两个独立气泡**（图卡一个卡片、文本一个卡片，垂直相邻），不再共用一个容器，与 PC 端"图片卡 + 文本气泡"分离式渲染一致。
+- **验证**：`flutter analyze` 零问题；真机确认图文消息与 PC 同构；历史消息自动按新规则渲染。
+
+### 发送回执幂等化与限额统一（2026-08-23 热修 05，App 3.0.0+9）
+
+- **背景（P0 修正）**：热修 04 的客户端"对账"（按历史文本+图片数/队列文本猜测是否送达）存在**静默丢草稿**风险——空文本图片发送（只发截图）会跳过文本比对、命中任意同图数旧消息即判"已送达"并清空待发图片；同文本旧消息同理。送达确认的正确层级是**协议层回执**，不是客户端启发式判断。
+- **服务端（requestId 幂等回执）**：
+  - `/send` 支持 `requestId`（UUID 形态校验，非法 400）；投递**之前**占位 in-progress，处理完成后记录结果快照；同一 `sessionId+requestId` 重复请求**直接返回第一次结果、不再二次投递**（处理中重复请求回 409 `receipt-pending`）；
+  - 新增 `GET /m/api/send-receipt`（只查不投）；回执 TTL 15 分钟、上限 2000 条，持久化 `~/.dsh/mobile-remote/send-receipts.json`（重启恢复，处理中状态不跨重启保留）；边界文档化：单进程内 + TTL 幂等，超期同 id 重试可能重复投递一次；
+  - 测试钩子：`DSH_MOBILE_REMOTE_DROP_RESPONSE=1` —— /send 处理后销毁连接不回包，用于模拟"服务端已接收但回程断开"。
+- **App**：
+  - requestId 与**草稿内容绑定**（文本+图片路径签名）：失败重试复用同一 id（服务端幂等，不重复投递）；草稿被编辑才换新 id；
+  - 传输层错误（reset/超时）或 409 → 有界轮询回执（4×1.2s）：`done` → 清草稿+「已送达，请勿重复发送」；`error` → 明确失败；查不到 → 保留草稿+「发送结果未知：请稍后点重试，重试不会重复发送」；服务端明确拒绝（400/413/404/500）→ 直接失败并重置 requestId；
+  - 图片发送同一套机制；**移除热修 04 的 `_reconcileSent` 启发式对账**；
+  - **限额统一**：客户端图片总量上限 40MB（64MB HTTP body 扣 base64 膨胀与 JSON 开销后的安全值）——超限客户端明确提示，不再落到服务端 413；内核侧 200MB 能力不变（PC 端同源）。
+- **保留热修 04**：`connection: close` / 桥 `agent: false` / 桥错误日志——缓解半关连接复用，但不作为送达保证。
+- **测试**：`tools/hotfix05-check.mjs`（无投递用例：非法 requestId 400、未命中回执 404、缺参 400、>64MB 声明 413；`DSH_MOBILE_LIVE=1` 追加：文本/空文本图片发送+回执 done+同 id 重试结果一致）；`flutter analyze` 零问题、`node --check` 通过。
+- **验证方法**（如何证明"不重复发送、不静默丢草稿"）：① 同 requestId 重试返回相同 messageId（不二次投递）；② `DSH_MOBILE_REMOTE_DROP_RESPONSE=1` 重启后真机发送 → App 显示「已送达」且草稿清空（回程断开不影响判定）；③ 断网发送 → App 保留草稿提示「结果未知」，恢复网络后点重试仅投递一次。
+
+### 图像链路 v2（2026-08-23，App 3.0.0+7）——tool/result 嵌套图片 + GIF 动图
+- **tool/result 嵌套图片（对齐 PC 端 contentParts 语义）**：实测内核 `read_image` 等工具结果的图片块**嵌套在 `tool-result.content` 内**（非消息顶层，此前 `imagesOf` 顶层收集漏掉 → 移动端助手消息只有占位/空白）。修复：
+  - 插件新增 `imagesOfNested()`（递归展开 tool-result.content），`assistant/message` 与 `tool/result` 摘要改用——SSE/history 事件摘要均带出嵌套图片引用（`{attachmentId, mediaType, width?, height?, name?}`，≤20 张）；
+  - `tool/result` 摘要重写：文本跨全部 content 块合并（原仅 content[0]）、callId/name/isError 从各块聚合；
+  - **App 零改动**：助手气泡本就有 `_ImagesGrid` 渲染（与用户图同套组件：宽高比/全屏/重试/LRU），摘要带出来后自动显示——与 PC 端"消息内容图片统一渲染"同构。旧版 App 忽略新字段，无破坏。
+- **GIF 动图（结论修正）**：动态播放链路已就绪——Flutter 原生支持（`MultiFrameImageStreamCompleter` 逐帧播放）、App 上传原始字节（日志实锤 24114B = 2×12057B 完整 GIF）、插件字节嗅探正确纠正为 `image/gif`、大图角标已加；**但发送后显示静态**——实测（复刻 PC 内核 RPC 注入同一 GIF）：内核附件规范化（`normalizeImage`，`canPassThroughNormalization` 明确把 `image/gif` 排除在直通外）取首帧重编码为静态 PNG（143B），且 PC 与移动端产物为**同一 sha256**——**移动端 = PC 端 = 内核设计**。"发出后动图"需内核（DSH 上游）保留动画附件，本插件/App 无法改内核（适配约束）；若无上游支持，v1 边界"GIF 静态展示"即为正确预期。
+- **验证**：单元 12/12 PASS——用真实采样的 read_image tool/result 事件（嵌套图）与构造 assistant/message（嵌套+顶层混合）验证摘要 images[] 输出、callId/name 回退、纯文本消息无 images 字段、用户消息顶层收集回归。
+
+### 队列"发送出去/删不掉"修复（移动端 ↔ 内核队列一致性）
+- **根因三层**：① 内核语义——`followup` 只入 `next-turn`,当前 turn 结束的瞬间 agent 循环即开新 turn 认领(与 PC 端一致)；② App 丢弃内核权威 `session/queue` 帧(`store.dart` 只处理 question/approval),dock 全靠 400ms 节流 REST + 20s 轮询,存在陈旧窗口——消息已被认领行仍显示；③ 删除 TOCTOU——被认领后内核返回 `queue-item-not-found`,而 `ApiException` 不带错误码,无法区分语义;④ **移动端与 PC 端观感差异**——PC 端 queued 行只进 Queue Dock、不渲染进对话窗口,移动端则插入乐观气泡,看起来"消息被发送出去了"
+- **方案 A（移动端排队语义改造,与 PC 端观感对齐）**：运行中 `followup` **不再进内核 next-turn**（内核会在当前轮结束瞬间自动认领执行 = "被发送出去"的根源）——改为**插件侧持存**（`~/.dsh/mobile-remote/held-queue.json`,重启不丢）:
+  - 排队消息**只进 dock,不渲染进对话窗口**（对齐 PC 端:被认领执行时 user/message 回显才上屏）——`_send` 不再为排队路径插入乐观气泡
+  - agent 真正空闲（整个任务/目标结束）后按序自动释放为 `followup`（新轮次执行）
+  - 持存期删除/编辑**永远成功**(插件侧,无"已被认领"竞态);插队=立即 `steer` 注入当前运行（下一步边界执行,与 PC 端一致——**插队不废**）
+  - 响应 `mode: "queued", note: "held-until-idle"`,App 端提示"已排队:当前任务结束后自动发送"
+- **服务端**:mux 把 `session/queue` 归一化为 **`mobile/queue` 帧**(`{sessionId, rows:[{id,text,placement}]}`,与 GET /queue 同款形状,合并持存行),认领/删除/编辑即时镜像;LAN 桥 SSE 空闲超时从"完全取消"收窄为 **60s**(>25s 心跳,防误杀且保留僵尸回收)
+- **App**:`store` 新增 `queueBySession` 镜像 + **帧权威**策略(帧永远覆盖,REST 仅无帧可依时兜底,防止旧 REST 快照覆盖新帧);chat dock 以帧为权威源——被认领瞬间行消失;删除/插话/编辑失败按 `queue-item-not-found` / `steer-unavailable` **语义化提示**;`ApiException` 增加 `code` 字段;`api.send` 返回 `(messageId, note)` 记录
+- **悬浮球**:SSE `readTimeout 0→50s`(插件 25s 心跳保活,静默死链 50s 内自动重连,通知不再断供);`markNotif` 收敛主线程(消 SSE 线程/主线程并发丢计数);`placePanel` 判空守卫 + onDestroy 取消面板动画/置空 panelParams(修 after-destroy `updateViewLayout(null)` 主线程 NPE 杀进程)
+
+### 图像链路（视觉模型移动端跟进——PC 端同 wire、同设计）
+- **发送**:`/send` 支持 `images[{mediaType,data(base64),name?}]`,与 PC 端 `session.prompt` 图片通道**完全同形**(`{type:'image',mediaType,data,name?}`——内核限额/降采样/附件落盘同一通路);纯文本仍走 followup 零回归;请求体上限 64MB
+- **⊕ 菜单**:拍照 / 从相册选择 / 命令(解决 composer 放不下;命令列表保持原逻辑)
+- **不压缩**:`image_picker` 原始字节上传(PC 端浏览器同样只发原文件字节,内核负责超界降采样 8192/64M)
+- **限额/能力**:catalog 下发 `imageLimits`(内核 session.history projections 同源数字:20MB/20张/64M 像素/8192 边)与每个模型的 `imageSupported`(inputModalities);App 发送前校验(限额/媒体类型/模型能力),服务端 `attachment-error` 兜底;模型选择器 📷 标注
+- **持存(方案A)兼容图片**:运行中排队图片也进插件持存(随 held-queue.json 落盘,重启恢复;插队=立即 prompt steer)
+- **渲染**:SSE/history 摘要带 `images[]` 元数据(不放大带宽);新增 `GET /m/api/attachment`(鉴权取图,`x-attachment-meta` 宽高/字节/名字,1h 缓存);App 气泡按宽高比渲染(`attachmentBytes` LRU 64 张),点击全屏(InteractiveViewer),失败点按重试
+- **v1 边界**:GIF 静态展示;tool/result 嵌套图片仍显示「[图片]」占位(版本二做)
+
+### 二次 Code Review 落实
+- **必改**:`md.dart` 列表/表格后段落乱序(`- a\n- b\nprose` 把 prose 渲染到列表上方);`notifications_screen` await 后补 mounted 守卫(pop 后 setState 崩溃);`sheets` 新建会话/文件夹 **busy 锁**(双击双建)+ 文件夹名 Windows 非法字符前置校验
+- **连接加固(实测定位)**:探测客户端地址/路径归一化与 save() 同源(`Api.forProbe`,防二维码地址带 `/m` 拼成 `/m/m/api/bootstrap` 404);连接失败提示追加网络原因引导(手机蜂窝/智能网络分流绕过局域网时,表现为同地址间歇 200/404/超时)
+- **中低**:`logger` 去每行 fsync(SSE 流式期间掉帧),文件体积改近似记账;`_MsgItem.copyWith` 显式断言(防未来复用静默变用户消息);`agent/status` child 注释缩进
+- **文档**:03-api §3.6b 帧表更新(`mobile/queue` 独立行,`mobile/frame` 收窄为问询/审批)
+
+### 验证
+`flutter analyze` 0 issues;`flutter test` 9/9;`node --check` 通过;版本不变(pubspec `3.0.0+5` / package.json `3.0.0`,与既有版本线一致)。
+
+### 背景
+DSH Desktop（0.1.1-rc.2 / v2.0.2）强制 webserver 只听 `127.0.0.1`——`dsh-plugin-desktop` 在 profile 组装时把 webserver 行替换为 `DesktopWebServer`（构造器对非回环 host 直接 throw，用户 patch 无法覆盖，唯一旋钮是端口），手机无法直连桌面版。旧版（rc.5 web profile）能 `0.0.0.0:3080` 所以手机可连。
+
+### 新能力：插件内置 LAN 桥（`lanBridge` 配置，默认关闭）
+- 插件在 DSH 进程内**自建第二个 HTTP 监听**（默认 `0.0.0.0:3080`），把 `${path}`（默认 `/m`）前缀请求**流式转发**到回环 webserver——手机填/扫 `http://<电脑局域网IP>:3080/m` 即可使用，**无需穿透、无需装任何工具、不改 DSH**（桌面版/web 版通用）
+- **安全边界**（代码强制）：
+  - 只转发移动端面（`/m/*`）；桌面 `/api` RPC 网关、`/m/api/qr-config`（含 token）、`/m/qr.png`（仅本机语义）一律 404 不转发 —— 桥不扩大桌面攻击面
+  - 未配置 **authToken 拒绝启动**（LAN 暴露必须强口令，docs/04-security.md）
+  - Host 头重写为回环信任值 → 下游 hostAllowed 自然放行；真实鉴权仍由 token 把关
+- **扫码/自动地址联动**：`lanBridge` 启用时 bootstrap `urls` 与桌面二维码（qr-config）首选地址自动变为桥地址（`http://<IP>:3080/m`），App 扫码即连，无需手动填
+- 诊断：`/m/api/diagnostics` `runtime.lanBridge` 上报 `{enabled, host, port, listening}`；插件日志打印监听状态与错误
+- 清理：插件卸载时桥随 effect 关闭
+
+### 配置（cordis.patch.yml，用户侧）
+```yaml
+lanBridge:
+  enabled: true
+  port: 3080        # 冲突可改；防火墙需放行该端口
+  host: 0.0.0.0     # 默认全接口；仅本机测也可用 127.0.0.1
+```
+
+### 三路全量 Code Review 修正（2026-08-22）
+- **服务端（23 项，0 CRITICAL/0 HIGH）**：桥加固——只转发 `/m/api*`（收窄原 `/m/*`）、`maxConnections=128`、headersTimeout 15s/requestTimeout 60s、upstream 15s 超时、剥离 `x-forwarded-*`/`via`、在网 socket 随卸载销毁；QR/bootstrap 地址按**实际监听成功**判定（绑定失败回退回环，不指向死端口）；`/llm-providers` POST 直调 `settings.mutate/credentials.set` 显式 try/catch（不再裸抛落 500）；`/notifications/read|delete` 与 `/sessions/touch` 写盘**去抖**（500ms/10s，卸载前冲刷）；`/notifications/delete` ids 限 500；`/history before=0` 语义修正；`/goal maxGoalRounds` 校验 1-10000；`/send` followup/steer try/catch；**authToken 弱口令全局告警 + 桥强制 ≥16 拒启**；lanBridge schema 校验 port/host
+- **App（17 项，1 HIGH）**：**HIGH 修复——页级动作统一 `_mySessionId`**（发送/停止/杀任务/消息操作/用量/命令菜单/工具页，叠层聊天不再发错会话）；余额成功清错误态；通知页错误态+store 联动实时刷新；SSE 连接窗口内晚到响应取消（半开 socket 修复）；深色模式链接品牌色；气泡解析缓存含亮度；`_decode` 非 JSON 兜底；`commands()` 区分 unavailable；analyze 唯一 info 消除
+- **Kotlin/文档（21 项，0 CRITICAL）**：Android 13+ 运行时请求 POST_NOTIFICATIONS；httpGet 补 readTimeout；Android 14+ 三参 startForeground 显式 SPECIAL_USE；addView 悬浮窗权限兜底；明文 HTTP 残余风险注释；**文档同步**——04-security 新增 §3b LAN 桥安全边界、09-compatibility 更新 0.1.1-rc.2 基线矩阵与配置项、README/06-install-run 版本、03-api 补 LAN 桥地址说明、AGENT-RULES 维护公告更新；版本三处统一（pubspec 3.0.0+5）
+
+### 未推送说明
+功能开发、全量评审修正已完成,并通过 PC 侧与真机（App 局域网实测）验证；**待本机全部复验通过后由用户决定推送**。
+
+## v2.8.2（2026-08-22）— 适配 DSH 0.1.1-rc.2（DSH Desktop v2.0.2）
+
+### 服务端（lib/index.js）
+- **CRITICAL 修复：`rpcError` 返回改为 `[status, code, message]` 元组**。调用展开 `error(res, ...rpcError(...))` 走迭代器协议，普通对象字面量与 `Object.create(null)` 均不可展开——**2.8.1 起全部 11 处 API 错误路径（队列/归档/fork/取消/模型/子代理/命令/goal）抛 `Spread syntax requires ...iterable[Symbol.iterator]`**，该 TypeError 上抛到 `handleApi` 外层 catch，统一退化为 `500 { error: "internal" }`，真实状态码/内核错误码/详情全部丢失。已实测复现（修复前 `500 internal` → 修复后 `400 session-not-found + detail`）
+- **错误码收窄为仅非空 string**：内核自定义错误码是契约字符串（`session-not-found` / `target-not-found` 等）；`DOMException.code` 等数字码不在契约内 → 落 fallbackCode（注释记录依据）
+- **GET `/m/api/commands` 拆分条件**：`commands` 服务未注册 → `200 { ok, commands: [], unavailable: true }`（优雅降级，App 端弹「无可用命令」，不硬 503）；服务在而会话不存在 → `404 session-not-found`（不再被空列表掩盖真实原因）
+- **POST `/m/api/commands` 适配内核四参签名**：`commands.execute(agent, line, images, signal)`（0.1.1-rc.2；2.8.1 旧三参调用会把 `AbortSignal` 误传 `images` 槽，已改正）；`images` 恒为空数组，`signal` 15s 超时；未知/畸形命令仍 `404 command-not-found`，服务缺失 `503` 附 detail；同样拆分 `!agent` → `404 session-not-found`（与 GET 一致）
+- 文档：03-api.md 补 §6.15 斜杠命令契约与端点总表行（2.8.0 引入时遗漏）
+
+### 验证
+- 修复后实测（DSH Desktop v2.0.2 / 0.1.1-rc.2，真实会话）：archive/fork 假会话 → `400 session-not-found + detail`；goal pause 无目标 → `400 no-active-goal`；feedback none 幂等 200 / positive 不存在消息 → `404 target-not-found`；commands GET 真会话 200 真实列表、假会话 404、POST `/goal` 200 真执行结果、`/bogus` 404、非斜杠 400 —— 全量通过
+- 三路 Code Review（服务端两轮：首轮发现 CRITICAL、复核通过 PASS；App 全量零改动）并修复发现项；App 侧维持 v2.8.1
+
+## v2.8.1（2026-08-22）— 消息操作栏 + 输入栏重构 + 命令入口 + 反馈增强
+
+### 消息操作栏（替代长按）
+- 助手消息下方**常驻操作栏**：复制 / 好的回答 / 有问题的回答 / 在新对话中分支——对齐 PC 端 `MessageIconActions`，点即用；**移除长按弹底部面板**
+- 操作逻辑抽为 `_runMessageAction` 统一处理（复制/反馈/分支），无重复代码
+
+### 反馈增强（对齐 PC 端）
+- 👍/👎 选中态 = **品牌蓝图标 + 浅蓝圆底**（PC 端 `data-active` 同款样式，positive/negative 同色）
+- **toggle 取消**：再点已选评级 = 取消反馈（服务端新增 `rating: "none"` → 内核 `messageFeedback.delete`，与 PC 端一致）
+- 反馈状态按 messageId 同步 live 列表与历史页；同消息提交中防连点竞态
+
+### 输入栏两层重构（对齐 PC 端 InputBar）
+```
+第一层: [输入框························]
+第二层: [⊕] [模型…] [权限…] [排队发送] [⭕] [发送]
+```
+- 模型/权限胶囊移到第二层，名称省略显示（超长截断，保证放得下）；排队胶囊固定宽度不被挤压；上下文圆环/发送按钮在弹性组外固定，任意窄屏不溢出
+- 深色主题适配（⊕ 图标不再黑压黑）
+
+### 命令入口
+- 第二层新增 **⊕ 命令按钮**（浅灰圆，对齐 PC 端 command）→ 弹命令列表 → 点选 `/命令名 ` 填入输入框（PC 端 leadingInput 语义，可补参数后发送）
+- 服务端新增 `GET/POST /m/api/commands`（对齐内核 `ctx.commands`：`list(agent)` / `execute(agent, line, signal)`）；未知/畸形命令返回 404 `command-not-found`
+
+### 其他
+- 版本号统一 2.8.1（插件 2.8.1 / App 2.8.1+4）
+- 全部改动经三路 Code Review（服务端/Flutter/Kotlin）并修复发现项；命令功能在测试窗口会话端到端实测通过
+
+## v2.8.0（2026-08-22）— 代码收敛重构（Phase 0/1/2，行为保持）
+
+### 服务端（lib/index.js）
+- **Phase 0 公共 helper**：新增 `agentSessionId` / `isLoopback` / `firstAgent` / `shortSessionId` / `notifyTitle` / `guardRes` 六个 helper，统一散落各处的重复写法（会话 id 归一、回环判定、标题兜底短码、响应防崩守卫）
+- **Phase 1 三收敛**：
+  - `readJson(req, res)` 收敛 20 处 `JSON.parse(await readBody(req))` + try/catch 样板（失败统一 400/413 响应）
+  - `rpcError(err, code)` 收敛 9 处 apiRpc 失败映射（传输层 502 / 超时中止 504 / 内核错误透传 status+code）
+  - `requireGet` / `requirePost` 收敛 29 处 405 方法检查；`/events` 保持严格 GET-only（HEAD 会悬挂 SSE 连接）
+- `/sessions` 列表标题统一兜底短码（live 与归档分支一致，标题永不裸 null）
+
+### 悬浮球（FloatingBubbleService.kt）
+- 新增 `baseUrl` / `httpGet` / `postState` / `openApp` / `roundedRect` / `isActive` / `isBusy` 七个 helper：统一 HTTP 请求骨架（含 finally disconnect）、主线程刷新、跳转、圆角背景、状态判定
+- `mainIntent` 统一前台通知与面板跳转的 Intent 构造（extra 类型守卫：String/Boolean/Int，成对传参）
+- 清理 3 个未使用 import；未读增量检查失败不再消费首次基线（消除瞬时失败误报）
+
+### App（Flutter）
+- 新建 `lib/fmt.dart`：`relTime` / `fmtTokens` / `permNameOf` 共享格式化（首页/会话页/聊天页/设置页收敛）
+- `toast.dart` 新增 `showToastAt(messenger, msg)`：sheets/settings 的本地 `_toast` 全部收敛
+- `theme.dart` 新增 `DshSwitch`：设置页三处开关统一
+- `openChat`（chat_screen.dart 顶层）统一 7 处打开会话流程（含悬浮球/新建/分支，返回后恢复语义保持）
+- `openNotificationsScreen`（main.dart 顶层）统一 3 处通知页入口；`openProviders`（providers_screen.dart）统一 2 处提供商页入口
+- `_persistPrefs` 收敛 8 个 setter 的 SharedPreferences 样板（不支持类型快速失败）；`_isNoiseText` 收敛消息噪声过滤；删除死代码 `api.events()`
+- 行为变化说明：assistant 消息现在与 user 消息一致地过滤 `background job ` 前缀注入帧（与 PC 端 GUI 对称）
+
+### 其他
+- 版本号统一 2.8.0（package.json / pubspec 2.8.0+3）
+- 纯收敛重构 + 少量 UI 修正，全部改动经多轮 Code Review
+- **UI 行为变化（v2.8.0 修复）**：
+  - 对话消息列表统一为普通列表（最旧在顶、最新在底）：消息少时内容贴顶、列表占满可滚动——修复旧版"下半部分空白死区 + 滑动消息消失"；根治 50/51 条边界列表方向翻转的滚动位置跳变
+  - 输入框胶囊行：容器内边距对称、胶囊行与输入框左缘对齐；模型胶囊超长省略号截断（防溢出）；插队按钮图标由播放三角改为右向箭头
+  - 悬浮球余额自查：JSON 解析兜底 try/catch（200 但畸形响应体不再产生异常噪音）
+
+## v2.7.2（2026-08-21）— 通知改"真结束"判定 + 悬浮球横屏修复
+
+### 通知（服务端 + App/悬浮球同源）
+- **只在对话真正结束时通知**：多轮大任务（goal 驱动/连续队列）不再每完成一个子轮次就推"✅ 任务完成"——`turn/end` 只暂存结果，agent 转为 idle 且稳定 `doneGraceMs`（默认 15 秒，插件配置可调）、且无 active goal，才判定"对话真正结束"并通知一次
+- **子代理会话不再单独通知完成/失败**：它是父任务的一部分，父任务结束才通知；「需要你回答」仍立即通知（交互式提问不能等）
+- **通知帧直推 SSE（`mobile/notify`）**：悬浮球/App 与插件通知中心同源渲染，悬浮球不再自行按轮次/job 弹"任务完成"
+- max-tokens 截断的完成通知会标注「max-tokens 截断」，避免误以为任务完整完成
+- **审批/提问提醒补全**：`approval/requested`、`question/requested` 立即生成 `needs-answer` 通知 + 推送桥（App 后台/被杀、悬浮球未开时也能收到）；悬浮球提醒统一由 `mobile/notify` 驱动（与弹窗帧去重，不再双弹）
+
+### 修复
+- **修复崩溃级 bug**：`mobile/notify` 广播中 shorthand `{ time }` 引用未声明变量（漏写 `time: now`）→ 每次通知都抛 ReferenceError，`armDone` 定时器异步回调中的异常在 Node 15+ 默认按 unhandledRejection 抛出 → **整个 DSH 进程崩溃**；已修正并给定时器回调整体加 try/catch 兜底
+
+### 插队发送
+- `/send` 端点新增 `mode: "steer"` 参数：插队发送（消息插到 agent 下一步执行），适合 team 插件子会话向主会话插队场景；agent 空闲时自动降级排队并在响应中标注
+- 手机端：**长按发送按钮 = 插队发送**；agent 空闲时提示并降级普通发送
+
+### 悬浮球横屏修复
+- **旋转/跳转后无条件自动贴边**：监听配置变更（`onConfigurationChanged`），按旋转前渲染位置（`lastRenderX`）判断贴左/贴右、保持隐藏状态——竖屏↔横屏、翻转 180°、页面跳转后球都自动回到边上，无需手动拖动
+- **挖孔/安全区偏移适配（关键修复）**：横屏时系统会把 overlay 窗口整体平移（本机挖孔屏 ROTATION_90 时右移 144px），不扣除偏移会导致球被推到屏幕外"消失"（翻转 180° 后更会稳定消失）。实测 `rootWindowInsets` 在 overlay 窗口上返回值不可靠，改用 **display 级权威数据 `defaultDisplay.cutout`**（API 29+）读取安全区，所有贴边/拖动/面板/气泡定位统一按"渲染坐标 = 坐标 + 系统偏移"计算
+- **拖动钳制**：x 限制在 `[-球径+16dp, 屏宽-16dp]`、y 限制在屏内（按渲染坐标钳制）——永远拖不出屏、不会进入无法恢复的位置
+- **自愈兜底**：按下时发现越界先钳回允许范围再开始拖（覆盖部分厂商不回调配置变更的情况）
+- 屏幕尺寸获取 API 30+ 改用 `currentWindowMetrics`（旋转后最可靠）
+
+### 其他
+- 版本号统一 2.7.2（package.json / pubspec 2.7.2+2）
+
+## v2.7.1（2026-08-18）— 稳定性修复 + 悬浮球余额预警完善
+
+### 修复
+- **会话列表慢（归档/取消归档后要几秒才生效）**：休眠会话标题折叠结果**缓存 5 分钟**（折叠需逐个读日志，50+ 会话实测 7 秒）+ App 端**乐观更新**（归档后本地列表立即生效，后台静默校准）——实测归档请求 29ms、列表刷新不再卡
+- **通知逐条保留**：每次轮次完成（主会话/子代理各自）独立生成一条通知，互不合并——已读的消息不再被后续轮次顶掉（去掉旧"同会话同类型聚合覆盖"）
+- **Agent 状态串台**：状态改为按会话绑定（`agentStatusMap`，bootstrap 全量同步 + 帧按 agentId 过滤）——切换工作区/回前台/打开会话时状态圆点与停止按钮不再显示成别的会话的；重连 `hello` 帧与重试 bootstrap 也同步状态
+- **悬浮球不再常亮**：余额低不再是"常亮状态"，改为事件式提醒（亮 60 秒自动消退 + 30 分钟防抖）
+- **顶部通知横幅彻底重写**：弃用 `OverlayEntry`（新版 Flutter 下 remove 后视觉残留，横幅挂住不消失）——改为 `MaterialApp.builder` 全局渲染（覆盖所有页面，含聊天页/通知页）；**回前台/悬浮球跳转时若有未读则强制提醒**（"错过的也提醒"，绕过防抖）；显示后自动更新未读基线不反复弹
+- **新建会话弹层补回「模型与推理强度」入口**：显示当前模型 + 强度，点击弹出模型/推理强度（off/high/max）选择——v2.7.0 首页改版时该入口遗漏
+- **新建会话工作目录自动匹配当前工作区**：改用规范化路径匹配（此前 `api.workspaces()` 原始路径与 workspacePath 大小写/斜杠不一致，永远回退第一个工作区）
+
+### 悬浮球余额预警（App 端为准）
+- **阈值可配置**：设置 → 账户 → 余额预警行点击选择 ¥5 / ¥10 / ¥20 / ¥50 / 自定义输入，持久化；副标题实时显示当前阈值
+- **开关联动**：悬浮球的报警判定**完全以 App 端开关 + 阈值为准**（开关/阈值变化即时推送，App 启动时同步）——开关关 → 悬浮球不因余额报警/亮起
+- **面板常驻余额行**：两位小数（`余额 ¥12.50`），低余额红字（静默警示，不亮球）；点击可去充值
+- 面板打开时顺带刷新余额；30 分钟自查照常更新数值
+
+### 悬浮球面板与徽标
+- **未读徽标胶囊化**：球上角标与面板通知区徽标均为胶囊形（圆角=高一半），单数字也保持胶囊比例；球上角标骑在球右上外缘（不再偏下）
+- **面板空状态**：无运行中会话 / 无通知时显示灰色占位文案（「暂无运行中的会话」「暂无通知」），面板不再空荡荡
+- **通知区标题行对齐**：最近通知 / 未读徽标 / 查看全部 三者文本视觉中心统一（去字体留白 + 垂直居中）
+
+## v2.7.0（2026-08-18）— 会话工具（任务/子代理/目标）+ 移动端体验打磨
+
+### 新增（移动端会话工具，PC 端 GUI 同源数据）
+- **任务进度**：会话运行中的后台任务（jobs）实时推送（SSE `session/jobs` 帧，连接回放 + 订阅更新），对话页活动条下方自动出现任务卡片（状态点/标签/取消）；AppBar 新增「会话工具」入口
+- **会话工具弹层**（任务 / 子代理 / 目标 三页签）：
+  - 任务：列表 + 取消（映射内核 `jobs.kill`，按会话隔离）
+  - 子代理：按父会话查询子代理列表（`subagent.list`）+ 中断（`subagent.interrupt`）
+  - 目标：查看当前目标（objective / 轮次 / 状态）、创建、暂停 / 继续 / 标记完成（映射内核 goal RPC，`sessionId + ref` 契约一致）；受阻时显示原因
+- **插件新端点**：`/m/api/jobs`（GET）、`/m/api/jobs/kill`（POST）、`/m/api/subagents`（GET）、`/m/api/subagents/interrupt`（POST）、`/m/api/goal`（GET/POST）；连接回放 `session/jobs` 帧，`onJobsChanged`/`onJobDone` 订阅随插件卸载清理
+
+### 新增（移动端体验）
+- **Agent 状态 bootstrap 同步**：连接 / 重连 / 下拉刷新时从 bootstrap 同步 agent 状态（思考中 / 工具执行 / 空闲），按钮与活动条即时反映 PC 真实状态
+- **下拉刷新收集地址**：refreshAll 吸收 bootstrap 的 `server.urls`（蒲公英 / Tailscale 等新地址及时进候选表，回环地址过滤）
+- **聊天草稿保留**：会话级缓存，输入内容退出会话后重进自动恢复（仅内存，不落盘）
+- **首页改版**：移除底部快捷输入框（模型/权限选择移至新建会话弹层与会话页）；欢迎语改为「今天打算设计什么？」；顶部展示 DeepSeek 官网官方 logo；内容块整体上移居中；最近会话卡片固定 3 行完整显示、超出卡片内滑动
+- **界面语言切换**：设置 → 显示 → 语言（中文 / English），即时生效、持久化；主要界面全量双语（首页 / 会话 / 聊天 / 设置 / 连接 / 通知 / 会话工具弹层 / 提供商管理页等）
+- **悬浮球（设置 → 显示，默认关）**：透明底圆形 DeepSeek 鲸鱼常驻桌面（App 被杀仍工作，自带 SSE）
+  - 状态：空闲=灰鲸半透明；有任务/通知/余额低=亮蓝 + 红点角标（60s 自动消退、开面板清零、同类防抖）
+  - 交互：单击展开迷你面板（运行中会话 / 最近通知 / 打开 App / 去充值）、拖动贴边 5s 无操作自动缩进、双击开 App、长按退出
+  - 面板：四角定位（随球位置向内展开）、点击外部关闭、SSE 事件即时刷新 + 5s 兜底、无内容区块隐藏、浅灰胶囊按钮
+  - 动效：按压缩放回弹、滑动吸附、亮暗 180ms 过渡、面板从球方向生长 + 逐项浮现
+  - 余额联动：悬浮球每 30 分钟自查余额，低余额亮起 + 气泡 + 按钮变红
+  - 面板通知区：最近通知（上限 3 条）+ 红色未读徽标（与 App 铃铛同源）+ 未读蓝点 + 相对时间 + 查看全部入口（点击跳 App 通知页）
+  - 操作说明：设置页「悬浮球操作说明」弹窗（状态含义 / 手势 / 面板操作，双语）
+- **余额预警（设置 → 账户，默认关）**：余额低于 ¥10 提醒充值，余额行红色警示
+- **充值入口**：跳转系统浏览器打开官方充值页（恢复 v2.6 原方式；小米不支持标准 Custom Tabs，已移除相关代码）
+- **通知提示（错过的也提醒）**：悬浮球每 60 秒 + App 每次刷新对比未读数增量——重连窗口 / 离线期间新增的通知，重连后**亮红点 + 气泡「有 N 条新通知」+ App 顶部横幅**（点击跳通知页），不只静默更新数据
+
+### 设计风格与动效
+- **主题令牌统一**：卡片圆角 14 / 弹层 20 / 输入框 10；阴影弱化为单层轻投影（浅底+细线+极轻投影分层）
+- **页面转场**：轻量 iOS 味（新页全宽滑入 + 淡入，旧页静止零重绘——解决 Cupertino 双页面渲染卡顿）
+- **通知铃铛实时刷新**：轮次结束 App 主动拉取通知（不依赖重连/下拉），插件写入通知后广播 `notifications/changed`
+
+### 修复
+- 任务四端点契约对齐内核 schema（`subagent.list` 需 `parentSessionId`、`subagent.interrupt` 需 `parentSessionId + childSessionId + mode`、goal 变更需 `sessionId + ref`；goal POST 的 agent 解析改用 body 的 sessionId）
+- 目标页「无目标」状态不再卡加载（服务端 `goal: null` 与加载中区分）
+- 目标操作后无论成败都刷新真实状态（轮次驱动可能已改变状态，如轮次耗尽→受阻）
+- 会话工具弹层旧插件降级：端点不存在时显示「加载失败 + 重试」而非白屏
+- **休眠会话标题**：重启 / 重连后历史会话直接显示标题（`sessionQuery.readTitleSnapshot` 从持久化日志折叠），无需点进去才更新
+- **通知聚合重新未读**：同会话同类型通知聚合时从已读集合移除——已读后同会话的后续完成会重新触发未读（修复角标/提示永久不亮）
+- 悬浮球：空闲检测不再被红点卡住（轮次边界驱动亮暗）、连接回放不误报通知、右半屏点击、贴边缩进（`FLAG_LAYOUT_NO_LIMITS`）、气泡按实际测量宽度定位（修复硬编码宽度致窄气泡飘到屏幕中间）、面板实时同步
+- 通知写入后广播 `notifications/changed`（App 铃铛实时更新，无需重开 App）
+- 悬浮球开关语义：`START_NOT_STICKY` + 余额推送仅在服务运行时生效（开关关着不再被系统复活 / 余额刷新拉起）
+
+### 兼容
+- 新增端点与 SSE 帧：旧 App 忽略新帧；旧插件无新端点（App 弹层提示加载失败，升级插件后可用）
+- 首页移除底部输入框为**行为变更**：首页发消息改为「＋新建会话」入口（会话页输入不受影响）
+- 已发布 API 无破坏性变更
+
+## v2.6.0（2026-08-17）— 安全加固 + 移动端过程可见性 + 模型提供商互通
+
+### 新增（安全）
+- **登录失败限流**：`rateLimit` 配置（默认 10 次/60s），错误口令按来源 IP 计数，超限返回 `429 rate-limited` + `Retry-After`；认证成功重置计数——防弱口令爆破（仅 `authToken` 启用时生效）
+- **推送内容脱敏（默认开启）**：第三方推送通道（Server酱/ntfy/Bark/generic）默认只推事件类型 + 会话短码，**会话标题、错误详情等核心内容不再外发**；确需完整内容设 `pushContent: "standard"`（旧行为，仅在信任通道时开启）
+- **链接 scheme 白名单（App）**：消息内链接仅 http/https 可点击，`file:`/`intent:`/`tel:` 等一律渲染为纯文本（含单元测试 `test/md_link_test.dart`）
+- **`/m/qr.png` 收口本机**：与 `qr-config` 同策略（Host 校验 + loopback 来源），不再对外提供无认证二维码渲染
+- **口令比较加固**：改为 sha256 定长化 + 常量时间比较，消除长度侧信道
+- **认证未启用显性警示**：插件启动日志告警 + 桌面设置页红色横幅「访问口令未启用」
+- **Android 备份隔离**：`allowBackup="false"`，口令/缓存不进云备份与 ADB 备份
+- **桌面设置页复制口令 60s 自动清剪贴板**（防其他应用读取；尽力而为）
+
+### 新增（移动端过程可见性）
+- **思考过程实时显示**：agent 思考时对话页出现可折叠「思考中…」面板，实时滚动思考内容（点开/收起），正文开始后显示「已思考 N 字」
+- **活动条**：思考 / 工具执行阶段在输入框上方显示轻量状态行（如「正在调用 read…」），结束即消失——不再"干等无反应"
+- **移除「显示工具调用」开关与工具卡片**：工具过程统一由活动条呈现，设置页与代码同步清理（工具结果细节以 PC 端为准）
+- **「思考内容」开关（设置 → 显示）**：默认关——只显示思考状态（思考中/已思考 N 字），不显示思考原文（deepseek 思考内容为英文，默认隐藏防刷屏；需要时打开）
+
+### 修复
+- generic 推送格式 `kind is not defined`（存量 bug，仅 generic 通道触发）
+- `z.enum` 不兼容 schemastery 导致插件加载失败（v2.6 新增配置项改用 `z.string` + 运行时校验）
+- **移动端消息重复显示**：SSE 回显先于 send 响应到达（且轮次分隔线已插入）时，乐观消息合并失败 → 同一条消息显示两次；改为全列表查找乐观消息合并
+- **工具阶段空气泡**：多步工具轮中正文为空的中间 assistant 消息不再渲染（过程由活动条呈现）
+- e2e-check：支持 `DSH_MOBILE_BASE` 环境变量、无 agent 实例自动跳过发送
+
+### 新增（模型提供商互通，PC × 移动端）
+- **模型提供商互通**：PC 端「设置 → 模型」配置的提供商与移动端同一通道，**两端一致、手机修改即时生效**
+  - 内核 `llm` 服务的可配置提供商目录全量上手机：除 deepseek-official 外，**37 个 dormant 提供商**（anthropic / openai / google / groq / mistral / nvidia / openrouter / xai / kimi / minimax / moonshotai / qwen / zai / xiaomi 等）在手机可见，配置 baseURL + API Key 即激活
+- **插件新端点**（`/m/api/llm-providers` GET / POST、`/m/api/llm-providers/probe`）：
+  - 提供商列表（live/dormant、settingsNs、baseURL、密钥状态——密钥引用只读，**不返回密钥本身**）
+  - 保存：`ctx.settings.mutate` 写配置 + `ctx.credentials.set` 存密钥（引用派生规则与 PC 端一致：`<PROVIDER>_API_KEY`）；仅允许写入配置目录声明的命名空间
+  - 探测：优先内核 `discoverModels`；内核未注册模型探测时（rc.5 deepseek 适配器）**回退 OpenAI 兼容 `GET {baseURL}/models`**
+- **App**：
+  - 模型选择器**按提供商分组**（组名 = 提供商显示名），dormant 提供商显示「未配置」不可选
+  - 设置新增「模型提供商」管理页：列表（已连接/未配置徽标 + baseURL + 密钥状态 + 目录模型数）、编辑（baseURL / API Key / 探测模型 / 清除密钥）
+- catalog 新增 `providers` 元信息；`session-config` 返回当前模型所属 `provider`；无 agent 兜底目录改为遍历全部提供商（不再写死 deepseek-official）
+- `llm.listProviders()` 等为同步方法，原 `.catch()` 链式调用抛错（端点改用 try/catch）
+
+### 文档
+- 06 新增「HTTPS 反代」章节（Caddy/nginx + 自签证书，可选 TLS 方案）
+- 03 新增 §6.13 模型提供商端点；04/09/00/07/README 同步：限流参数、429 错误码、推送脱敏、链接白名单、备份说明、提供商互通
+
+### 兼容
+- `pushContent` 默认 minimal 为**行为变更**：升级后推送内容变精简（通道配置无需改动，如需完整内容显式设 standard）
+- 移除「显示工具调用」为**行为变更**：移动端不再显示工具结果卡片，工具过程以活动条呈现
+- 旧 App 忽略 catalog 新增字段；旧插件无新端点（App 管理页提示加载失败，升级插件后可用）
+- 已发布 API 无破坏性变更；`rateLimit` / `pushContent` 均为新增可配置项
+
+## v2.5.2（2026-08-17）— 抽屉与弹层溢出修复
+
+### 修复
+- **工作区过多时抽屉挤出「设置」入口**：工作区列表改为封顶屏高 35% 的可滚动区，导航三项（首页/会话/设置）固定在可见区域，不再被顶出屏幕（感谢社区反馈与 PR #1 的思路）
+- **底部弹层条目过多溢出**：通用底部弹层与「新建会话」弹层的列表区改为可滚动，底部按钮固定
+- **切换连接地址弹层溢出**：候选地址随使用动态累积，列表区改为可滚动（同类隐患全库排查后修复）
+- **agent 问询卡片挤压输入框**：问题说明长/选项多时卡片封顶 40% 屏高内部滚动
+- **连接配置页键盘溢出**：表单整体可滚动，小屏 + 键盘弹出时不再溢出
+
+## v2.5.1（2026-08-17）— 连接自愈提速 + 版本线统一
+
+### 版本线统一（重要）
+- **App 版本 = 插件版本 = git tag**：插件 2.4.1 对齐为 **2.5.1**，此后每次发布三处一起 bump
+- GitHub Release 每版同时提供 `DSH-Remote-vX.Y.Z.apk`（App）+ `dsh-mobile-remote-vX.Y.Z.tgz`（插件包）
+- 版本差矩阵见 README「版本与兼容」（同版本完美；不同版本可用但"谁旧谁吃亏"）
+
+### 修复/优化
+- **黑洞地址快速故障切换**：手机关组网/隧道断时，从约 72 秒缩短到**约 10 秒**自动切到可用地址（SSE 超时即轮换 + 连接/探测超时 15s→8s）
+- **下拉刷新升级**：改为「探测 → 自愈 → 拉数据」——先探测连通性，不通自动轮换地址并重建连接；失败弹短提示「电脑连接不上，正在自动重连…」（成功静默）
+- 文档：蒲公英手机端保活设置（国产 ROM 杀后台是外出断连头号原因）；安装依赖补充 `github:` 快捷方式与按 tag 锁版本
+- APK 本地归档带版本号：`tools/package-release.ps1` → `dist/DSH-Remote-vX.Y.Z.apk` + `dist/dsh-mobile-remote-vX.Y.Z.tgz`
+
+## v2.5.0 / 插件 v2.4.1（2026-08-17）— 可靠性加固与体验完善
+
+### 新增
+- **手动切换连接地址**：设置 → 电脑地址点按弹出候选列表（当前打勾），探测可达后切换并重连（回家切局域网 / 出门切组网）
+- **首页最近会话显示所属工作区**：小字 + 文件夹图标，与 PC 端分组同源；不属于任何工作区显示「未分组」
+- **余额缓存兜底**：插件缓存余额 60s，官方 API 慢/失败时返回最近一次成功值
+- **全局提示统一**：短滞留（1.6s，长错误 3s）+ 悬浮样式，不遮挡底部操作区
+- 顶部在线状态点：紧贴抽屉菜单、细描边（视觉微调）
+- 场景化文档：外出访问主推蒲公英（实测截图 + 下载链接），其他方案保留思路
+
+### 修复
+- **组网地址黑洞连环故障**：SSE HTTP 无超时 → 地址不通但不拒绝时永久卡 connecting、看门狗与轮换全部失效 → SSE 加 15s 超时；重配置保留旧候选地址；二维码首选局域网段
+- **手动切换后界面不刷新**：switchBase 补 notifyListeners + 成功提示
+- **重新配置清空旧配置**：改为新配置保存成功才覆盖，连接页提供「返回（保留原配置）」
+- **SSE 僵尸连接**：半开连接立即清理（error 事件 + 写失败 dropConn）
+- **余额慢链路失效**：官方接口超时 10s→15s，App 侧 15s→25s
+- **引用块渲染 NaN 矩阵**：IntrinsicHeight 修复（内容重叠/无法滑动）
+- Windows 防火墙「公用网络」拦截排查（FAQ 一键命令）
+
+## v2.4.2（2026-08-17）— 连接可靠性修复
+
+### 修复
+- **SSE 静默断连卡死**：网络切换/路由器断连时 TCP 静默死亡、流不报错，App 永远显示已连接但实际离线（只能划掉重开）→ 新增心跳看门狗（识别服务器 25s `: ping`，75s 无心跳强制重建连接）+ 回前台时校验旧流活性（>45s 无心跳即重建）
+- **扫码连不上（链路本地地址）**：未登录的 Tailscale/断网虚拟网卡产生 169.254.x 地址并排在地址列表首位，二维码首选这个不可达地址 → 插件排除 169.254/16 并按「局域网私有地址优先」排序；App 地址收集同步排除
+- **环境诊断永远显示旧版本**：旧版只在首次打开时拉取，插件升级后仍显示旧版本号 → 每次打开实时拉取，失败明确显示「检测失败」
+- 充值入口改走服务端配置（`catalog.rechargeUrl`，插件 `rechargeUrl` 为准，缺省回退官方页）
+
+### 新增
+- `trustedHosts` 配置：显式放行内网穿透中继主机（frp/SakuraFrp 场景，配合强口令）
+- 单元测试 `test/api_logic_test.dart`：多地址合并/轮换/回环与链路本地排除（5 用例）
+
+## v2.4.1（2026-08-16）— 外出访问：多地址自动切换
+
+### 新增
+- **多地址自动切换**：App 连接成功后自动从电脑收集全部地址（局域网 IP + Tailscale IP，`/api/bootstrap` 的 `server.urls`），断线重试失败时自动轮换——出门自动切 Tailscale、回家自动切回局域网，全程免手动配置
+- 设置 → 电脑地址显示「共 N 个地址自动切换」
+
+## v2.4.0（2026-08-16）— 问询/审批弹窗 + 兼容性硬化
+
+### 新增（移动端补齐"人类交互"）
+- **问询弹窗**：agent 用 `ask_user_question` 提问时，手机对话页弹出卡片（单选/多选选项 + 自定义输入），与 PC 端**同一 pending 通道**，任一端回答两端同步消失
+- **权限审批弹窗**：工具越权时手机弹出「权限请求」（工具名 + 原因 + 允许一次/拒绝）
+- 弹窗桥：插件 `ctx.inject(["apiProxy"])` 订阅 mux 队列（PC GUI 同机制），SSE `mobile/frame` 帧转发，断线重连补发挂起待答帧
+- `/m/api/respond` 应答端点（question/approval/cancel），经 `apiProxy.respond` 走内核校验
+- **通知删除**：长按单删 / 垃圾桶批量多选 / 清空全部（`/m/api/notifications/delete`，不影响 PC 端）
+- **微信式无限上翻**：滑到顶部自动加载更早（无断页）；「回到底部」浮钮
+- 余额旁独立刷新按钮（移除点击数字刷新的旧交互）；应用日志默认 15 天清理
+- 顶部抽屉与标题间电脑在线状态点（点按探测/重连）
+- 诊断探针：`services` 全量服务探测 + `respondBridge`/`frameBridge`/`pendingFrames`
+
+### 修复
+- **问询/审批桥拿不到 apiProxy**：各插件上下文隔离，`ctx.get` 看不到兄弟插件服务 → 改用 `ctx.inject`（dsh-client-connection 同款）
+- 手机点 ✕ 取消后卡片不消失（本地状态提前清空导致 resolved 帧被跳过）→ 即时收起 + 无条件转发
+- 聊天初始化竞态：SSE 事件与历史加载并发时不再丢失/回退 lastSeq
+- 历史页加载不再污染正在流式生成的草稿
+
+### 硬化
+- `webServer` 守卫：纯 headless Harness 下插件静默无操作不崩进程
+- Release 签名：正式 keystore（gitignore）+ key.properties 自动回退 debug
+- 渲染后端定版 **Impeller**：此前"小米白屏→回退 Skia"系旧列表实现误判，深滚动在 Impeller 下完全正常（Skia 分段模式保留为 `_infiniteMode=false` 兜底）
+
+## v2.1.0（2026-08-15）— 开源准备
+
+### 新增
+- **桌面设置页「连接移动端设备」**：dsh 客户端模块，显示扫码二维码（含地址+口令）+ 连接信息（`/m/api/qr-config`，仅 loopback）
+- **原生 Flutter App**（`dsh-mobile-app/`）：扫码连接、首页/对话/会话/通知/设置/新建会话全原生界面，DeepSeek 配色双主题
+- **修改默认配置**：默认 Agent 预设 / 默认权限预设可直接在移动端修改（`POST /m/api/defaults`，与 PC 端同一写入通道）
+- **通知聚合**：同一会话同一类型通知合并，不再按轮次刷满列表
+- **工作区归属**：新建会话 cwd 为已注册工作区子目录时自动归属最近工作区（不再落"未分组"）
+- App：深色模式三态切换、环境诊断时间戳、返回键层级处理、长任务排队提示
+
+### 修复
+- **SSE 解析死循环**（buf 在循环内不更新导致 CPU 100% 卡死）—— 重写为 StringBuffer 增量解析
+- App 通知页黑色背景（独立页面缺 Scaffold）
+- App 消息重复显示（SSE 回显按 messageId 优先去重）
+- App 目录选择器无限加载（初始化未触发）
+- App 通知角标 Positioned 崩溃、HTTP 客户端泄漏、流式渲染风暴
+- 小米设备 Impeller+Vulkan 白屏/卡顿（回退 Skia）
+- 消息文本去重、首页文案、链接复制等细节
+
+## v2.0.0 — 移动端 v2（新建会话 / 目录 / 通知中心 / 诊断 / 余额）
+
+- 新建会话：Agent 预设 + 模型/推理/权限 + 工作目录（跨盘浏览、新建文件夹）
+- 通知中心：已读持久化（文件存储）、未读角标
+- 环境诊断、余额查询、插件动作区、SSE 事件桥（重连退避/断线补拉）
+
+## v1.0.0 — 移动端 v1（MVP）
+
+- `/m` 移动页：登录、发消息、SSE 流式、会话历史
+- 访问口令认证（cookie/header）、Host 校验、二维码
+- 推送桥：Server酱 / ntfy / Bark / generic
+

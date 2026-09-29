@@ -1,0 +1,682 @@
+# 03 API 接口设计文档 — dsh-mobile-remote
+
+> 版本：v3.2.0 · 状态：已实现 · 配套：00-开发总纲.md、02-architecture.md、04-security.md、09-compatibility.md
+> 前缀：`/m`（可配置项 `path`，默认 `/m`）。以下所有路径均以前缀开头。
+> 服务端 API 同时服务 Flutter App（dsh-mobile-app）与桌面设置页客户端模块；不含网页版页面（v2.1 起移除）。
+## 1. 通用约定
+
+- **内容类型**：JSON API 一律 `application/json; charset=utf-8`；错误统一 `{ "error": string, "detail"?: string }`。
+- **鉴权**：`authToken` 配置为空 → 无鉴权；非空 → 除 `GET /m/api/qr-config`（仅 loopback）外，所有端点要求凭证。
+- **凭证形式**（二选一，任一通过即可）：
+  - 请求头：`X-Mobile-Token: <token>`（App 使用）
+  - Cookie：`dsh_mobile_token=<token>`（兼容保留，无登录入口）
+- **未认证响应**：`401 { "error": "auth-required", "detail": "访问口令未通过验证" }`。
+- **路由匹配**：`/m/api/*` 按前缀注册；未知子路径 → `404 { "error": "not-found" }`；`/m` 之外的裸路径不拦截（fallback 仍归桌面 SPA）。
+## 2. 端点总表
+
+| 方法 | 路径 | 用途 | 鉴权 |
+|---|---|---|---|
+| GET | `/m/api/bootstrap` | 初始状态：地址、认证要求、agent 摘要、会话列表 | 是 |
+| POST | `/m/api/send` | 向指定/默认 agent 注入消息（v2.7.2 支持 `mode: "steer"` 插队） | 是 |
+| GET | `/m/api/queue` | 排队消息列表（对齐 PC 端 Queue Dock；`placement: "queued"` 可插话、`"steering"` 不可，v2.7.2） | 是 |
+| POST | `/m/api/messages` | 排队消息操作：`{ sessionId, itemId, action: { kind: "edit"|"remove"|"steer", content? } }`（转发内核 `session.updateQueue`；错误码如 `queue-item-not-found`/`steer-unavailable` 透传，v2.7.2） | 是 |
+| GET | `/m/api/sessions` | 会话列表 | 是 |
+| GET | `/m/api/history` | 指定会话的 Conversation timeline 历史（按 seq 分页） | 是 |
+| GET | `/m/api/event-detail` | 单个 Visible event 无损详情（按 seq） | 是 |
+| GET | `/m/api/events` | SSE 事件流（session/event 摘要） | 是 |
+| GET | `/m/api/catalog` | 模型/推理/权限/预设目录 | 是 |
+| GET/POST | `/m/api/session-config` | 会话配置（读写） | 是 |
+| POST | `/m/api/sessions` | 新建会话 | 是 |
+| POST | `/m/api/sessions/touch` | 标记会话被打开（最近活跃排序） | 是 |
+| POST | `/m/api/sessions/archive` | 归档会话 | 是 |
+| POST | `/m/api/sessions/unarchive` | 恢复（取消归档） | 是 |
+| POST | `/m/api/sessions/stop` | 停止（取消）会话当前运行 | 是 |
+| POST | `/m/api/sessions/fork` | 在新对话中分支（映射内核 `session.fork`） | 是 |
+| GET/POST | `/m/api/feedback` | 消息反馈 👍/👎（内核 `messageFeedback` 服务，与 PC 端同一份） | 是 |
+| GET | `/m/api/notifications` | 通知列表 | 是 |
+| POST | `/m/api/notifications/read` | 标记已读 | 是 |
+| POST | `/m/api/notifications/delete` | 删除通知记录（单条/批量/全部） | 是 |
+| POST | `/m/api/respond` | 回答内核问询/审批（与 PC 端 GUI 同一 respond 通道） | 是 |
+| GET | `/m/api/actions` | 插件动作清单 | 是 |
+| POST | `/m/api/actions/:id/invoke` | 执行插件动作 | 是 |
+| GET | `/m/api/usage` | 会话 token 用量 | 是 |
+| GET | `/m/api/workspaces` | 已注册工作区 | 是 |
+| GET/POST | `/m/api/directories` | 目录浏览/新建文件夹 | 是 |
+| GET | `/m/api/diagnostics` | 环境诊断 | 是 |
+| GET | `/m/api/balance` | DeepSeek 官方余额 | 是 |
+| GET | `/m/api/account-usage` | 用量与额度（DeepSeek / Codex / OpenCode Go） | 是 |
+| GET | `/m/api/qr-config` | 桌面二维码数据（loopback only） | 否（loopback） |
+| POST | `/m/api/defaults` | 修改默认 Agent/权限预设 | 是 |
+| GET/POST | `/m/api/llm-providers` | 模型提供商列表 / 保存配置（v2.6） | 是 |
+| POST | `/m/api/llm-providers/probe` | 探测端点模型列表（v2.6） | 是 |
+| GET | `/m/qr.png` | 二维码 PNG | 否 |
+| GET | `/m/api/jobs` | 会话后台任务列表（v2.7，内核 jobs 同源） | 是 |
+| POST | `/m/api/jobs/kill` | 取消任务（v2.7，映射 `jobs.kill`） | 是 |
+| GET | `/m/api/subagents` | 子代理列表（v2.7，按父会话 `subagent.list`） | 是 |
+| POST | `/m/api/subagents/interrupt` | 中断子代理（v2.7，`subagent.interrupt`） | 是 |
+| GET/POST | `/m/api/goal` | 当前目标 / 创建·暂停·继续·完成（v2.7，goal RPC 同源） | 是 |
+| GET/POST | `/m/api/commands` | 斜杠命令目录/执行（v2.8.0；v2.8.2 适配内核 0.1.1-rc.2 四参签名，服务缺失优雅降级） | 是 |
+
+## 3. 端点详述（v1 既有端点）
+### 3.1 GET /m/api/bootstrap
+
+**响应 200**
+
+```json
+{
+  "ok": true,
+  "auth": { "enabled": false },
+  "server": {
+    "port": 3080,
+    "urls": ["http://192.168.1.5:3080", "http://100.101.102.103:3080", "http://127.0.0.1:3080"]
+  },
+  "capabilities": {
+    "eventTimeline": {
+      "version": 1,
+      "live": true,
+      "history": true,
+      "detail": true,
+      "unknownEvents": true,
+      "callCorrelation": true
+    }
+  },
+  "agents": [
+    { "id": "session-abc", "status": "running", "hasPending": false }
+  ],
+  "sessions": [
+    { "id": "session-abc", "createdAt": 1750000000000, "cwd": "F:\\DSH-Outpost" }
+  ]
+}
+```
+
+- `urls`：按优先级排列——首个非 internal IPv4（含蒲公英/Tailscale 等虚拟组网段）在前，loopback 最后；`port` 来自 `ctx.webServer.port`。v3.0.0：`lanBridge` 监听成功时首选地址为桥地址（`http://<IP>:<lanBridge.port>`，端口默认 3080），回环 webserver 地址仅作本机自连兜底。
+- `agents[].status`：`"running" | "idle"`（映射自 agent 状态与最近事件推断）。
+- 未认证：`401`（见通用约定）。
+### 3.2 POST /m/api/send
+**请求**
+
+```json
+{ "sessionId": "session-abc", "text": "帮我跑一下测试", "mode": "steer" }
+```
+
+- `requestId` 可选（**v3.0.0 热修 05**）：客户端生成的 UUID（`^[A-Za-z0-9-]{8,64}$`，非法 → `400 invalid requestId`）。携带时服务端启用**幂等回执**：投递之前占位 in-progress，处理完成后记录结果快照；同一 `sessionId+requestId` 的重复请求**直接返回第一次结果、不再二次投递**（`Connection reset by peer` 后重试不会产生重复消息）。回执经 `GET /m/api/send-receipt` 查询；单进程内 + TTL 15 分钟幂等，持久化于 `~/.dsh/mobile-remote/send-receipts.json`（重启恢复；处理中状态不跨重启保留）。
+
+图片发送（v3.0.0 图像链路，与 PC 端 wire 同形，原始字节不压缩）：
+
+```json
+{ "sessionId": "session-abc", "text": "这是什么", "images": [{ "mediaType": "image/png", "data": "<base64>", "name": "photo.png" }] }
+```
+
+- `sessionId` 可选：指定会话（必须存在且其 agent 存活）；缺省 → 第一个 root agent。
+- `mode` 可选（v2.7.2）：`"followup"`（默认，排队到下一轮）| `"steer"`（插队：消息插到 agent 下一步执行，适合 team 插件子会话向主会话插队）。agent 空闲时 `steer` 自动降级为 `followup`，响应 `note: "agent-idle-followup"`。
+- `images` 可选（v3.0.0）：`[{ mediaType(仅 png/jpeg/webp/gif), data(canonical base64 原始字节), name? }]`——经内核 `session.prompt` 图片通道（内核限额/降采样/附件落盘，与 PC 端完全同一通路；纯文本仍走 followup）。超限/非规范 → `attachment-error`（`IMAGE_TOO_LARGE`/`INVALID_IMAGE_BASE64` 等）。请求体上限 64MB；**移动端客户端总量上限 40MB（热修 05）**——64MB body 扣掉 base64 膨胀（×4/3）与 JSON 开销后的安全值，超限在客户端明确提示、不落到服务端 413；内核侧 200MB 能力不受影响（PC 端同源）。**mediaType 纠正（v3.0.0 热修 02）**：服务端按字节魔数（PNG/JPEG/GIF/WebP/HEIC）嗅探真实类型，声明与字节不符自动纠正（warn 记录）；未识别类型原样交内核裁决。图片路径 200 响应带 `accepted: true`（与文本路径语义一致）。
+- **v3.0.0（方案 A）**：`followup` 且 agent **运行中**时，消息**不进内核 next-turn**（内核会在当前轮结束瞬间自动认领执行，PC 端同款语义），而是**插件侧持存**——只出现在 Queue Dock/移动端 dock，**不渲染进对话窗口**（与 PC 端一致）；agent 真正空闲（整个任务/目标结束）后按序自动释放为 `followup`。持存期间消息可经 `/messages` 删除/编辑/插队（全部插件侧执行，无认领竞态）。响应 `mode: "queued", note: "held-until-idle"`。持存文件 `~/.dsh/mobile-remote/held-queue.json`，插件重启不丢。图片持存同样支持（base64 随持存落盘，重启恢复；插队=立即 prompt steer）。
+**响应**
+
+- `200 { "ok": true, "agentId": "session-abc", "messageId": "m_<uuid>", "mode": "followup" | "steer" | "queued" }`（`mode: "queued"` 时附 `note`；图片路径 `note: "image-prompt"`）
+- `400 { "error": "empty-text" }`：text 为空或非字符串
+- `404 { "error": "session-not-found" }`：指定会话不存在
+- `503 { "error": "no-live-agent" }`：无匹配的运行中 agent
+- `503 { "error": "agents-unavailable" }`：agents 服务不可用（非 web 组合或启动中）
+**语义**：服务端构造 `createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })` 后调用 `agent.followup(message)`（排队/空闲释放）或 `agent.steer(message)`（插队）；运行中 `followup` 走持存（见上）；含 `images` 时经内核 `session.prompt` 图片通道。`followup` 会持久化消息并唤醒空闲驱动器；不等待执行结果（结果经 SSE 回流）。
+
+### 3.2c GET /m/api/send-receipt（v3.0.0 热修 05，发送回执查询）
+
+**查询参数**：`sessionId`（与发送时一致；缺省按 root agent 解析）、`requestId`（必填，非法 → `400 invalid requestId`）。
+**响应**：`200 { "ok": true, "receipt": { "status": "done" | "error" | "in-progress", "result": {...} } }`（`result` 为发送响应快照，含 messageId/accepted/note/mode）；未命中 → `404 receipt-not-found`。
+**语义**：客户端在传输层错误（reset/超时）后用**同一个 requestId** 查询——`done` 即确认已送达（请勿重发）；`in-progress` 稍后轮询；`404` 表示第一次请求未到达服务端（可重试，同 id 幂等）。此端点**不投递任何消息**。
+
+### 3.2b GET /m/api/attachment（v3.0.0 图像链路，渲染取图）
+
+**查询参数**：`sessionId`、`attachmentId`（均必填，来自 SSE/history 摘要的 `images[].attachmentId`）。
+**响应**：`200` 原始字节（`Content-Type` 按 `mediaType`，`Cache-Control: private, max-age=3600`，`x-attachment-meta` 带 width/height/bytes/name）；`400` 缺参；`404 attachment-not-found`；其他错误透传。鉴权与其他端点一致（`x-mobile-token`/cookie）。
+### 3.3 GET /m/api/sessions
+
+**响应 200**
+
+```json
+{
+  "ok": true,
+  "sessions": [
+    {
+      "id": "session-abc",
+      "createdAt": 1750000000000,
+      "cwd": "F:\\DSH-Outpost",
+      "live": true,
+      "title": "会话标题（活动会话）",
+      "archived": false,
+      "lastActivity": 1750000123456
+    }
+  ]
+}
+```
+
+- 排序：`lastActivity` 倒序（无活跃记录时回退 `createdAt`）。数据源：优先 `sessionQuery.listSessions()`（含休眠会话），回退 `ctx.sessions.list()`（仅活动会话）。
+- `archived`：是否已归档（见 3.4 归档接口）。
+- `lastActivity`：最近活跃时间（ms）。任意会话事件（SSE）与移动端"打开会话"（3.4 touch）都会更新，持久化于 `~/.dsh/mobile-remote/session-activity.json`。
+
+### 3.4 归档 / 活跃时间接口
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/m/api/sessions/touch` | 标记会话被打开（更新 lastActivity） |
+| POST | `/m/api/sessions/archive` | 归档会话（映射内核 `workspace.archiveSession`，与 PC 端同一份状态） |
+| POST | `/m/api/sessions/unarchive` | 恢复（取消归档） |
+| POST | `/m/api/sessions/stop` | 停止（取消）会话当前运行（映射核心 RPC `session.cancel`） |
+
+请求体统一为 `{ "sessionId": "session-abc" }`。
+
+- `touch` 响应：`200 { "ok": true, "lastActivity": 1750000123456 }`
+- `archive` / `unarchive` 响应：`200 { "ok": true, "archived": true|false }`
+- `stop` 响应：`200 { "ok": true, "accepted": true }`；失败时 `400 { "error": "cancel-failed" }`（v2.8.0 起统一 rpcError 映射：内核错误透传 status+code、传输层 502、超时 504；旧版固定 500）
+- 归档状态即内核 `workspaceRegistry.archivedSessionIds`（与 PC 端同一份）：PC 端归档的会话在移动端同样显示为已归档，反之亦然。归档会话仍出现在 3.3 列表中（`archived: true`），由客户端分栏展示。
+
+### 3.5 GET /m/api/history
+
+**查询参数**
+
+- `sessionId`（必填）：目标会话
+- `after`（可选）：**增量模式**——只返回 `seq > after` 的事件（SSE 重连补漏用）。
+- `before`（可选）：**上翻分页**——只返回 `seq < before` 的最近 `limit` 条事件（对话内滚动到顶部加载更早）。
+- 三种模式优先级：`after` > `before` > 初始加载（缺省时返回最近 `limit` 条，即尾部）。
+- `limit`（可选，默认 500，上限 1000）：最多返回条数
+**过滤规则**：返回可进入 Conversation timeline 的事件；`assistant/chunk` / `assistant/live-chunk` 只用于实时草稿，`agent/inbox/spliced` 由队列投影承载，`request/header`（含 system prompt/tool schema）、`request/context`、`session/title-llm-request` / `web/deepseek-search-llm-request`（LLM 请求快照：data 含 `system` 系统提示词与 `messages` 对话正文）、`session/end-seed`、`step/start`、`step/end`、`system/message`、`assistant/attempt`（重试/中断的原始 stream 记录）与 `compaction/start` / `compaction/summary` / `compaction/prune` / `compaction/end`（压缩生命周期；summary 正文即替换 shadowed 区间后的上下文快照）属于内部/重建/快照元数据，历史、实时与 3.5b 详情三处都不返回。`compaction/end` 作为不落卡片的实时控制帧通知 App 重新加载 durable snapshot。
+
+未知 type（即使带 `ignorable: true`）**保留 `seq`/`type` 进入时间线**（事件保真：不能因客户端尚未认识类型而静默丢弃），但**不下发详情指针**——`detail.available` 只对下方 allow-list 内的可见类型为真，其余类型调 3.5b 返回 `404 event-not-found`。这保证「新类型照常可见」与「未命名记录的原始载荷不外泄」同时成立（fail-closed）。
+
+**详情可见类型（allow-list）**：`user/message`、`assistant/message`、`tool/call`、`tool/result`、`todo/write`、`turn/start`、`turn/end`。
+
+判定依据：这几类正是 `summarizeEventCore` **逐个类型显式审过载荷**并下发给 App 的类型；其余类型走 default 分支只给 `{seq, type}`，App 从不消费其 data。`assistant/chunk` / `assistant/live-chunk` 虽被 App 消费，但属于实时草稿（不落 durable 历史），故不在名单内。
+
+**有意的 fail-closed 取舍**：`approval/*`、`question/*`、`session/jobs`、`session/title`、`subagent/*`、`command/*`、`tool/ptc-dispatch*` 这些 App 会渲染卡片、但插件**尚未审过载荷**的类型当前**不在** allow-list —— 调试模式下展开这类卡片会显示「详情不可用」。原因是它们可能携带 prompt / 命令正文（如 `subagent/descriptor`、`command/run`）。要放行某个类型，需先逐类型审计载荷，然后**同时**改服务端 `DETAIL_VISIBLE_TYPES` 与 App 侧详情入口白名单。
+
+> 客户端呈现约定：`session/title`、`model/selection`、`sandbox/mode`、`agent-preset/selected`、`subagent/*`、`team/*`、`feedback/*`、`command/*`、`approval/policy`、`tool/ptc-dispatch*`、`goal/change`、`plan/mode`、`permission/preset`、`schedule/change`、`hook/*`、`llm/retry*`、`deliverables/presented`、`tool-workflow/*`、`session-log-deepseek/delivery-accepted`、`subagent/model-selection-policy` 属协议/运行时元数据——仍下发并保留 `seq`，但普通模式不渲染，调试模式可展开审阅（见 05-test-cases F-34）。`approval/asked` / `approval/decided` 是 durable 审批记录，普通模式以可读标题呈现（历史回放的权威源；问询只有瞬态帧，不保证回放）。
+**响应 200**
+
+```json
+{
+  "ok": true,
+  "sessionId": "session-abc",
+  "after": 42,
+  "hasMore": false,
+  "events": [
+    { "seq": 43, "type": "user/message", "detail": { "available": true, "seq": 43 }, "data": { "text": "帮我跑一下测试" } }
+  ]
+}
+```
+
+`events[]` 使用与 SSE 帧相同的摘要格式（见 3.6），保证客户端去重逻辑单一。数据源：`ctx.sessions.get(id).events`（追加式冻结快照，天然按 seq 有序）。
+- `404 { "error": "session-not-found" }`
+
+### 3.5b GET /m/api/event-detail
+
+按会话和 durable `seq` 读取单个 Visible event 的无损详情。该端点需要认证；服务端优先使用 `sessionQuery.readEvent`，旧内核回退到活动会话快照或休眠会话读取。
+
+查询参数：`sessionId`、`seq`。
+
+```json
+{
+  "ok": true,
+  "sessionId": "session-abc",
+  "event": {
+    "seq": 43,
+    "type": "tool/result",
+    "time": 1750000000000,
+    "surfaceOp": "append",
+    "sourceEventSeqs": [42],
+    "data": { "callId": "call-1", "isError": false, "text": "完整结果" }
+  }
+}
+```
+
+当服务端只能从 seeded session 的当前 surface 读取时，成功响应额外包含 `"degraded": true, "detailMode": "current-surface"`；客户端必须保留该元数据并提示详情可能不完整。详情不存在或属于内部/敏感类型返回 `404 event-not-found`；单事件详情超过 8 MiB 返回 `413 event-detail-too-large`。
+
+稳定错误矩阵：`session-not-found`（会话不存在）、`event-not-found`（seq 不存在/不可见/无详情权限）、`session-corrupt`（会话数据损坏）、`event-read-failed`（读取失败）和 `event-detail-too-large`（超过 8 MiB）。错误响应不得泄露主机路径或原始异常；旧服务端未保存详情时客户端显示安全错误并提供重试，不猜测重建。
+
+> 命名说明：本端点的读取失败码是 **`event-read-failed`**（单事件级），与 `/m/api/history` 的 **`session-read-failed`**（整会话回放失败）语义不同，**不要**为"统一"而合并——App 侧对两者有各自的文案与重试路径。
+
+**规范化正文（`text`）**：`assistant/message` 的详情响应额外附 `data.text`，由服务端用**与事件摘要同一个 `blocksToText`** 提取（只拼 `type == "text"` 的块，跳过 `reasoning` 与内部块），因此与摘要下发的 `text` 同源同规则。客户端必须直接采用该字段作为正文，**不得自行递归拼接 `message.content`**——那会把 `reasoning` 块并进正文，使思维链在折叠块之外重复出现（issue #1 需求变更记录）。`tool/result` 等其它类型的详情仍以原始事件载荷为准；原始 `message` 块原样保留。
+
+### 3.6 GET /m/api/events（SSE）
+`Content-Type: text/event-stream`。帧格式（`data:` 单行 JSON）：
+
+```json
+{ "type": "session/event", "sessionId": "session-abc", "event": { "seq": 44, "type": "turn/end", "data": { "reason": { "kind": "complete" } }, "detail": { "available": true, "seq": 44 } } }
+```
+
+**事件摘要 `event` 字段**：实时和历史使用同一摘要 envelope；摘要可包含 `detail: { available: true, seq }`，长参数/结果通过 3.5b 按需读取，不在列表中静默截断。只有 `/event-detail` 真能取回的事件才带该指针（token delta 与内部/快照记录不带，避免客户端显示必然 404 的详情按钮）。
+
+`assistant/message` 的指针额外带 **`textChars`**：与摘要同 `blocksToText` 口径的**未截断**正文长度。客户端据此**在加载前**判断「详情是否真有正文增量」（`textChars > 当前可见正文长度`），从而普通模式只在确有增量时显示加载入口；调试模式不受此限，始终提供「查看原始事件」。该字段为纯增量，旧客户端忽略即可。
+
+| event.type | event.data 内容 |
+|---|---|
+| `user/message` | `{ text: string }`（text blocks 拼接，≤2000 字符）；v3.0.0 起附图 `images: [{ attachmentId, mediaType, width?, height?, name? }]`；文件块可带 `files: [{ attachmentId?, path?, name?, mediaType?, size? }]`（**用户自己的附件，保留**；App 只显示文件名/类型/大小，不提供下载——issue #1 需求变更） |
+| `assistant/message` | `{ text: string, reasoningChars: number, reasoning?: string }`（`reasoning` 为思维链正文，仅当非空时下发，供移动端折叠块；≤20000 字符）；v3.0.0 起附图 `images: [...]`（同上）；**v3.0.0 版本二**：`images` 含嵌套收集——`tool-result.content` 内的图片块（read_image 等工具结果）与顶层图一并带出（对齐 PC 端 contentParts 语义）；**文件块不再下发 `files`**（issue #1 需求变更：时间线不提供产出文件的下载入口） |
+| `assistant/chunk` / `assistant/live-chunk` | `{ text: string }` 文本/reasoning delta；工具参数 delta 的 canonical `chunk.id` 归一为摘要 `callId`（仅实时过程，历史过滤） |
+| `tool/call` | `{ turn, step, callId, name, arguments }`；长参数可通过详情端点获取 |
+| `tool/result` | `{ callId, name, isError, text, images? }`；长结果可通过详情端点获取；**不再下发 `files`**（issue #1 需求变更：工具产出文件不上时间线；图片仍带 `images`） |
+| `turn/start` | `{ turn: number }` |
+| `turn/end` | `{ turn: number, reason: object }` |
+| 其他 | 保留 `type`、`seq` 和详情指针；调试模式展开无损数据 |
+
+**控制帧**：连接建立后立即 `data: {"type":"hello","serverTime":...,"capabilities":{"eventTimeline":{...}}}`；每 25s `: ping` 注释行。bootstrap 同样返回 `capabilities.eventTimeline`，客户端应按能力协商而不是按版本号猜测。
+**错误语义**：鉴权失败在连接建立阶段以 `401` HTTP 状态返回（EventSource 会触发 error 事件，客户端转登录态）。
+
+### 3.6b SSE 帧类型汇总（v2.3+ 扩展）
+
+除 3.6 的 `session/event` 外，SSE 还会推送：
+
+| type | 说明 |
+|---|---|
+| `session/context` | `{ sessionId, contextWindow }`——模型上下文窗口（`request/context` 事件，PC 端圆环同源） |
+| `agent/status` | `{ agentId, sessionId, status, child }`——running / waiting / idle；`sessionId` 为去 `session:` 前缀的会话 id，`child` 标记子代理会话（v2.7.2 起携带后两字段） |
+| `notifications/changed` | 通知记录增删（如移动端删除后），客户端刷新列表与角标 |
+| `mobile/notify` | `{ notification: { id, kind, sessionId, title, detail, time } }`——插件"真结束"判定后推送的通知（completed / failed / needs-answer），悬浮球/App 与通知中心同源渲染（v2.7.2） |
+| `mobile/frame` | 内核瞬态帧（问询/审批）。`frame` 字段为 `question/requested`（含 `rpcId`、`questions[]`）、`question/resolved`（`questionRpcId`）、`approval/requested`（`rpcId`、`approvalId`、`toolName`、`reason?`）、`approval/resolved`（`approvalId`）。**App 断线重连时服务端补发挂起的待答帧**（`pendingFrames` 回放） |
+| `mobile/queue` | `{ sessionId, rows: [{ id, text, placement }] }`——内核队列快照（`agent/inbox/spliced` 即时镜像，v3.0.2）：认领/删除/编辑实时反映，App 端 dock 以此为权威源（`placement`: `queued` / `steering` / `context`，与 GET /queue 同款形状）；断线重连时 mux 回放当前队列 |
+
+客户端应按 `type` 分派；未知 type 使用通用事件卡保留顺序，并在调试模式通过详情指针展开（前向兼容）。
+### 3.7 GET /m/qr.png
+
+**查询参数**：`text`（必填，二维码内容，URL 编码）。无 `text` → `400`。 **响应**：`200 image/png`（qrcode 包生成，尺寸 512，纠错级别 M）。
+## 4. 错误码汇总
+| HTTP | error 值 | 场景 |
+|---|---|---|
+| 400 | `bad-request` | JSON 解析失败 / 缺参 / 参数类型错误 |
+| 400 | `empty-text` | send 的 text 为空 |
+| 401 | `auth-required` | 未提供有效凭证 |
+| 401 | `bad-token` | 登录口令错误 |
+| 429 | `rate-limited` | 登录失败超限（v2.6，仅 authToken 启用时；响应带 `Retry-After` 头，默认 60s 后恢复） |
+| 404 | `not-found` | 未知路径 |
+| 404 | `session-not-found` | 会话不存在 |
+| 404 | `event-not-found` | 事件不存在、属于内部/敏感类型，或不在移动端 Visible timeline |
+| 413 | `event-detail-too-large` | 单个无损详情超过 8 MiB 上限 |
+| 405 | `method-not-allowed` | 方法不支持（GET 端点收到 POST 等） |
+| 503 | `no-live-agent` | 无运行中 agent |
+| 503 | `agents-unavailable` | agents 服务不可用 |
+
+## 5. 版本兼容策略
+
+- 端点仅追加、不破坏性修改；`event` 摘要格式允许增加字段，禁止删除/重命名既有字段。
+- 前端与后端同包发布（单文件页面由插件自身服务），无跨版本部署问题。
+## 6. 移动端新增端点（Phase 1，v2.0）
+> 全部要求鉴权（与既有端点一致）；写操作遵循与 PC 端相同的确认语义（如 Full Access 风险确认由客户端先行，服务端在参数中携带确认标记）。
+### 6.1 端点总表
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/m/api/catalog` | 模型目录 + 推理强度 + 权限预设 + Agent 预设（全部枚举，一次拉取） |
+| GET | `/m/api/session-config` | 当前会话配置（模型/推理强度/权限/预设） |
+| POST | `/m/api/session-config` | 更新当前会话配置 |
+| POST | `/m/api/sessions` | 新建会话（preset 参数） |
+| GET | `/m/api/notifications` | 通知列表（未读/已读） |
+| POST | `/m/api/notifications/read` | 标记已读（单条/全部） |
+| POST | `/m/api/notifications/delete` | 删除通知记录（单条/批量/全部，v2.3） |
+| GET | `/m/api/actions` | 插件动作清单（实时） |
+| POST | `/m/api/actions/:id/invoke` | 执行插件动作 |
+| GET | `/m/api/usage` | 会话 token 用量统计（v2.1） |
+| GET | `/m/api/workspaces` | 已注册工作区（新建会话默认目录，v2.1） |
+| GET | `/m/api/directories` | 目录浏览（盘符/子目录，v2.1；v3.1.1 根视图响应新增 `sep` 字段） |
+| POST | `/m/api/directories` | 新建文件夹（v2.1） |
+| GET | `/m/api/diagnostics` | 环境诊断（服务端端点实测，v2.1） |
+| GET | `/m/api/balance` | DeepSeek 官方余额（服务端代查，v2.1） |
+| GET | `/m/api/account-usage` | 用量与额度（服务端代查，v3.2） |
+| GET | `/m/api/qr-config` | 桌面二维码数据（loopback only，v2.1） |
+| POST | `/m/api/defaults` | 修改默认 Agent/权限预设（v2.1） |
+
+> **路径风格约定（v3.1.1，issue #5）**：`GET /m/api/directories?path=`、`POST /m/api/directories {path}` 与
+> `POST /m/api/sessions {cwd}` 的路径允许按客户端平台习惯传分隔符（Windows `\` / WSL·Linux·macOS `/`）；
+> 服务端会归一化为**当前平台**分隔符后读盘/建夹/建会话（旧版 App 在 WSL 上拼出的 `/\home` 也能命中真实目录）。
+> 根视图响应（`path` 为空）携带 `sep`（服务端真实分隔符），新版 App 据此拼接子目录，不再按 Windows 习惯硬编码 `\`；
+> 该字段为纯增量，旧版 App 忽略即可。
+
+### 6.2 GET /m/api/catalog
+
+返回 PC 端真实枚举（单一事实源，客户端不硬编码）：
+```json
+{
+  "ok": true,
+  "models": [
+    { "id": "deepseek-v4-flash", "name": "DeepSeek-V4-Flash" },
+    { "id": "deepseek-v4-pro", "name": "DeepSeek-V4-Pro" }
+  ],
+  "reasoningEfforts": ["off", "high", "max"],
+  "permissionPresets": [
+    { "id": "read-only", "name": "Read Only", "description": "只读 · 拒绝一切写入操作" },
+    { "id": "workspace-write", "name": "Workspace Write", "description": "仅工作区内读写 · 危险操作前询问" },
+    { "id": "danger-full-access", "name": "Danger Full Access", "description": "完全访问 · 可执行任何操作" }
+  ],
+  "agentPresets": [
+    { "id": "standard", "name": "标准模式", "description": "功能完整的编码 Agent：文件编辑、Shell、文件与网页检索、Skills、计划、目标、子代理和工作流" },
+    { "id": "code", "name": "PTC 模式", "description": "—" },
+    { "id": "minimal", "name": "极简模式", "description": "—" },
+    { "id": "cordis", "name": "创造模式", "description": "—" }
+  ],
+  "defaults": {
+    "model": "deepseek-v4-flash",
+    "reasoningEffort": "max",
+    "permissionPreset": "workspace-write",
+    "agentPreset": "standard"
+  }
+}
+```
+
+数据来源：`ctx.llm.listProviders()/listModels()`、provider 配置（reasoningEffort 枚举）、`ctx.sandboxPolicy`/permission-presets 服务、agent-presets 目录 manifest（name/description）。默认值来自 settings/配置树。
+### 6.3 GET /m/api/session-config
+
+```json
+{
+  "ok": true,
+  "sessionId": "session-abc",
+  "config": {
+    "model": "deepseek-v4-flash",
+    "reasoningEffort": "max",
+    "permissionPreset": "workspace-write"
+  }
+}
+```
+
+### 6.4 POST /m/api/session-config
+
+**请求**（三个字段均可选，只更新给定项）：
+
+```json
+{
+  "sessionId": "session-abc",
+  "model": "deepseek-v4-pro",
+  "reasoningEffort": "high",
+  "permissionPreset": "danger-full-access",
+  "confirmDanger": true
+}
+```
+
+- `permissionPreset` 为 `danger-full-access` 时 `confirmDanger` 必须为 `true`，否则 `400 { "error": "risk-confirmation-required" }`（与 PC 端 Full access 需显式确认风险一致）。
+- 权限写入走 PC 端同一路径（`permission/preset` + sandbox/approval 旋钮事件）。
+- 修改当前会话配置不产生新事件；`404 session-not-found`。
+### 6.5 POST /m/api/sessions（新建会话）
+
+**请求**：
+```json
+{
+  "preset": "standard",
+  "model": "deepseek-v4-flash",
+  "reasoningEffort": "max",
+  "permissionPreset": "workspace-write"
+}
+```
+
+- `preset` 必填（客户端从 catalog 选择；默认值由服务端 `defaults.agentPreset` 兜底）；其余可选。
+- 服务端：`ctx.agents.create({ preset, ... })`（按 preset 组合会话），随后按参数覆写配置。
+**响应**：`200 { "ok": true, "sessionId": "session-xyz", "agentId": "session-xyz" }`——客户端随后即可 `POST /api/send` 或订阅 SSE 该会话。
+### 6.6 GET /m/api/notifications
+
+通知由服务端从会话事件流**聚合**（不新增存储）：
+
+```json
+{
+  "ok": true,
+  "unread": 2,
+  "items": [
+    { "id": "n-1", "kind": "needs-answer", "sessionId": "session-abc", "title": "需要你回答", "detail": "发现 214 个重复文件，是否删除以释放空间？", "time": 1750000000000, "unread": true },
+    { "id": "n-2", "kind": "completed", "sessionId": "session-abc", "title": "任务完成", "detail": "备份配置到 E 盘（耗时 4 分钟）", "time": 1750000000000, "unread": true },
+    { "id": "n-3", "kind": "failed", "sessionId": "session-def", "title": "任务失败", "detail": "日志分析任务执行失败，已自动重试", "time": 1750000000000, "unread": false }
+  ]
+}
+```
+
+- `kind`：`completed`（turn/end 正常）、`needs-answer`（等待人类决策——从审批/提问相关事件推导，Phase 1 实现时验证语义）、`failed`（turn/end 异常/aborted）。
+- **未读状态持久化**：插件在 settings 域保存已读 id 集合（`ctx.settings`），服务重启不丢。
+- 排序：时间倒序；上限 100 条。
+### 6.7 POST /m/api/notifications/read
+
+```json
+{ "ids": ["n-1", "n-2"] }
+```
+或 `{ "all": true }`。响应 `200 { "ok": true }`。
+### 6.7b POST /m/api/notifications/delete（v2.3）
+
+```json
+{ "ids": ["n-1", "n-2"] }
+```
+或 `{ "all": true }`。删除移动端通知镜像中的记录（不影响 PC 端自己的通知中心）；不设墓碑——后续新事件仍会正常生成新通知。删除后经 SSE 广播 `notifications/changed` 帧，客户端刷新列表与未读角标。响应 `200 { "ok": true }`。
+### 6.7c POST /m/api/respond（v2.3，问询/审批弹窗）
+
+回答内核人类问询（`ask_user_question` 工具）或权限审批。插件经 `apiProxy.respond` 回写，**与 PC 端 GUI 完全同一 pending 通道与校验**（`matchesQuestions`、审批决策等由内核把关）：
+
+**问询**（`kind: "question"`，answers 顺序与提问一致、每问必答）：
+
+```json
+{ "kind": "question", "rpcId": "<frame 携带的 rpcId>", "sessionId": "session-abc",
+  "answers": [ { "id": "q1", "selected": ["方案A"] }, { "id": "q2", "selected": [], "custom": "先跳过" } ] }
+```
+
+- 单选：`selected` 至多 1 项；给了 `custom` 则 `selected` 必须为空（二选一）。
+- 多选：`selected` 多项；`custom` 可与之并存。
+- `selected` 必须是提问声明的选项 label。
+
+**审批**（`kind: "approval"`）：
+
+```json
+{ "kind": "approval", "rpcId": "...", "sessionId": "session-abc", "approvalId": "a-1", "outcome": "allowed-once" }
+```
+
+- `outcome`：`allowed-once` | `rejected`。
+
+**取消**（`kind: "cancel"`）：内核收到 cancelled，agent 按 `ASK_CANCELLED` 继续。
+
+响应：`200 { "ok": true, "accepted": true }`；`accepted: false` + `reason`（如 `not-pending`，PC 端已先回答）。
+
+**SSE 帧**：`question/requested`（含 `questions[]`）、`question/resolved`、`approval/requested`（toolName/reason）、`approval/resolved`，经 `mobile/frame` 帧推送；App 断线重连时服务端补发挂起的待答帧。
+### 6.8 GET /m/api/actions
+
+**动作契约 v0.1**（可选能力，插件不注册则返回空数组，客户端隐藏动作区）：
+
+```json
+{
+  "ok": true,
+  "actions": [
+    { "id": "fs-cleanup", "title": "清理磁盘", "icon": "trash", "fields": [ { "key": "target", "label": "目标目录", "placeholder": "如 F:\\资料" } ] },
+    { "id": "test-run", "title": "跑测试", "icon": "zap", "fields": [] }
+  ]
+}
+```
+
+- 服务端注册表：`ctx.mobileActions.register({ id, title, icon, fields?, handler })`——id 冲突抛错（Cordis 语义）；插件卸载随 fiber dispose 自动移除。
+- `icon` 限定为移动端内置图标库的 id（不允许插件自带 UI/图标）。
+- `fields`：v0.1 仅支持 `text` 类型字段。
+### 6.9 POST /m/api/actions/:id/invoke
+
+**请求**：`{ "args": { "target": "F:\\资料" } }`
+
+- 服务端校验注册表存在与参数类型，调用 `handler(args)`（跑在电脑端）。
+- 执行结果**不直接返回**（可能长任务）：`200 { "ok": true, "accepted": true }`；后续进展经 SSE 会话事件回流（动作应通过既有消息/工具通道呈现）。
+### 6.10 GET /m/api/qr-config（桌面二维码数据，v2.1）
+**仅电脑本机可访问**（TCP 层 socket 来源，仅 loopback 可访问；否则 403 `loopback-only`）—— 桌面 dsh 设置页客户端模块用它生成「连接移动端设备」二维码。
+> v2.6.0：`/m/qr.png`（二维码图片渲染，供设置页 `<img>` 使用）同样收口——Host 校验 + loopback 来源，非本机 403。
+**响应**：`{ "ok": true, "urls": ["http://192.168.1.100:3080/m", ...], "token": "<authToken>", "path": "/m" }`
+
+> v3.0.0：`lanBridge.enabled` 且监听成功时，`urls` 首选为桥地址（`http://<电脑局域网IP>:<lanBridge.port>/m`，端口默认 3080）；绑定失败自动回退 webserver 地址（不指向死端口）。
+
+二维码内容格式：`DSHREMOTE|<地址>|<口令>`（地址取 `urls` 中首个非回环项，不含 /m 尾巴）。App 扫码解析后自动配置连接。
+### 6.11 POST /m/api/defaults（修改默认配置，v2.1）
+修改**默认 Agent 预设 / 默认权限预设**（作用于之后新建的会话），与 PC 端设置页同一写入通道（走 `/api` 调 `settings.update`，不在 HTTP 回调直接调 settings 服务）。
+**请求**：`{ "agentPreset": "code", "permissionPreset": "workspace-write" }`（两者均可选）
+
+**响应**：`200 { "ok": true }`；失败 `400 { "error": "update-failed", "detail": "<原因>" }`
+
+### 6.12 错误码补全
+| HTTP | error 值 | 场景 |
+|---|---|---|
+| 400 | `risk-confirmation-required` | 选 danger-full-access 未带 confirmDanger |
+| 400 | `invalid-preset` | preset 不在目录内 |
+| 404 | `action-not-found` | 动作 id 未注册 |
+| 503 | `action-busy` | 同一动作并发执行限制（v0.1 可先不做） |
+
+### 6.13 模型提供商（v2.6，与 PC 端「设置 → 模型」同一配置通道）
+> 全部端点需鉴权；密钥只写不读（响应不含密钥本身）。
+
+**GET `/m/api/llm-providers`** — 提供商列表（live + dormant）
+```json
+{ "ok": true, "providers": [
+  { "id": "deepseek-official", "name": "DeepSeek", "dormant": false,
+    "settingsNs": "llm-deepseek", "settingsPath": [],
+    "baseURL": "https://api.deepseek.com", "apiKeyRef": "DEEPSEEK_API_KEY",
+    "keyConfigured": true, "keyWritable": true, "catalogModels": [{"id":"deepseek-v4-pro","name":"DeepSeek-V4-Pro"}] },
+  { "id": "anthropic", "name": "anthropic", "dormant": true, "settingsNs": "…", "baseURL": null, "keyConfigured": false }
+]}
+```
+- dormant = 配置目录已声明但未激活（配好 baseURL/密钥即生效）；37 个内置 dormant 提供商（anthropic/openai/google/groq 等）
+- `apiKeyRef` 为凭据引用名（如 `DEEPSEEK_API_KEY`），**非密钥本身**；`keyConfigured` 指示是否已存
+
+**POST `/m/api/llm-providers/probe`** — 探测端点模型列表
+```json
+请求: { "settingsNs": "llm-deepseek", "baseURL": "https://…", "apiKey": "可选", "protocol": "可选" }
+响应: { "ok": true, "models": [{"id":"…","name":"…","contextWindow":…}], "fallback": true }
+```
+- 优先内核 `discoverModels`；内核未注册模型探测时回退 OpenAI 兼容 `GET {baseURL}/models`
+- 凭据一次性使用，不存储；仅允许探测配置目录声明的命名空间
+
+**POST `/m/api/llm-providers`** — 保存提供商配置
+```json
+请求: { "provider": "deepseek-official", "settingsNs": "llm-deepseek",
+        "baseURL": "https://…", "apiKey": "可选（留空不修改）", "removeKey": false }
+响应: { "ok": true, "provider": "…", "apiKeyRef": "…", "keyConfigured": true }
+```
+- 经 `settings.mutate` 写配置 + `credentials.set` 存密钥（引用派生规则与 PC 端一致：`<PROVIDER>_API_KEY`）
+- 仅允许写入配置目录声明的命名空间（`400 unknown-provider`）；`removeKey: true` 清除已存密钥
+
+### 6.14 会话工具（v2.7：任务 / 子代理 / 目标，PC 端 GUI 同源）
+> 全部端点需鉴权；数据与 PC 端「任务 / 子代理 / 目标」同一内核服务，手机只读 + 简单操作。
+
+**GET `/m/api/jobs?sessionId=可选`** — 会话后台任务列表（不传 sessionId 返回全部）
+```json
+{ "ok": true, "sessionId": "…", "jobs": [
+  { "id": "…", "kind": "task", "label": "…", "status": "running",
+    "startedAt": 1786987923387, "finishedAt": 1786987923387 }
+]}
+```
+- 状态：`running / stopping / completed / failed`；任务视图与 SSE `session/jobs` 帧同源
+- 会话不存在 `404 session-not-found`；jobs 服务不可用 `503 jobs-unavailable`
+
+**POST `/m/api/jobs/kill`** — 取消任务
+```json
+请求: { "sessionId": "可选", "jobId": "…" }
+响应: { "ok": true }
+```
+- 映射内核 `jobs.kill(jobId, agent, reason)`；失败 `400 job-kill-failed`
+
+**GET `/m/api/subagents?parentSessionId=…`** — 子代理列表（按父会话）
+```json
+{ "ok": true, "parentAvailable": true, "subagents": [
+  { "id": "…", "kind": "child", "status": "running", "title": "…" }
+]}
+```
+- 映射内核 `subagent.list`（payload `{ parentSessionId }`）；`status` = activity（running/inactive）或 diagnostic reason
+- 缺参数 `400 parentSessionId-required`；会话不存在 `404 session-not-found`
+
+**POST `/m/api/subagents/interrupt`** — 中断子代理
+```json
+请求: { "parentSessionId": "…", "childSessionId": "…" }
+响应: { "ok": true }
+```
+- 映射内核 `subagent.interrupt`（payload `{ parentSessionId, childSessionId, mode: "continuable" }`）
+
+**GET `/m/api/goal?sessionId=…`** — 当前目标（无目标返回 `{ "goal": null }`）
+```json
+{ "ok": true, "goal": { "id": "…", "revision": 1, "objective": "…",
+  "phase": "active", "maxGoalRounds": 256, "roundsStarted": 0,
+  "createdAt": 1786987923387, "updatedAt": 1786987923387, "activation": "armed" } }
+```
+- `phase`: active / paused / blocked / complete；blocked 时含 `blockedReason`（如轮次耗尽）
+- 无会话 `503 goal-unavailable`
+
+**POST `/m/api/goal`** — 创建 / 暂停 / 继续 / 完成
+```json
+请求: { "action": "create|pause|resume|complete", "sessionId": "…",
+        "objective": "create 必填", "maxGoalRounds": "create 可选" }
+响应: { "ok": true }
+```
+- 映射内核 goal RPC（契约一致：create 需 `sessionId + objective`；pause/resume/complete 需 `sessionId + ref`，ref 由插件经 `goals.get(agent)` 自动取得）
+- 缺参 `400 sessionId-required / objective-required`；无当前目标 `400 no-active-goal`；非法 action `400 bad-action`
+
+### 6.15 斜杠命令（v2.8.0 引入 / v2.8.2 适配内核 0.1.1-rc.2）
+
+**GET `/m/api/commands?sessionId=…`** — 命令目录（对齐内核 `ctx.commands`）
+```json
+{ "ok": true, "commands": [
+  { "name": "goal", "description": "set or view the goal for a long-running task",
+    "input": { "hint": "[<objective>|clear|edit <objective>|pause|resume]", "images": true } }
+] }
+```
+- 命令条目：`name` / `description` 必填；`input`（`hint` / `images`）可选，有则返回
+- `commands` 服务未注册（无 dsh-commands host 服务）→ `200 { ok, commands: [], unavailable: true }`（App 端弹「无可用命令」，不硬 503）
+- 会话不存在 → `404 session-not-found`；缺 `sessionId` → `400 bad-request`
+
+**POST `/m/api/commands`** — 执行斜杠命令
+```json
+请求: { "sessionId": "…", "line": "/goal" }
+响应: { "ok": true, "result": { "commandId": "cmd-…", "result": { "kind": "success", "text": "…" } } }
+```
+- 映射内核 `commands.execute(agent, line, images, signal)`（0.1.1-rc.2 四参签名；本插件 `images` 恒为空数组，`signal` 为 15s 超时中止；2.8.1 的旧三参调用会把 AbortSignal 误传 images 槽，已改正）
+- `line` 必须以 `/` 开头（否则 `400 bad-request`）；未知/畸形命令 `404 command-not-found`；服务未注册 `503 commands-unavailable`（带 detail）；服务在而会话不存在 `404 session-not-found`（与 GET 拆分语义一致）
+- `result` 为内核 settle 对象（`commandId` + `result.{kind,text}`），与 PC 端一致
+
+### 6.16 GET /m/api/account-usage（用量与额度，v3.2）
+
+服务端并发查询三个固定来源，凭据只在电脑端解析和使用；手机端只接收成功来源的脱敏投影。默认使用电脑进程内 60 秒快照；详情页顶部刷新使用 `?refresh=1` 绕过快照并发起一轮新的查询（2 秒内重复刷新受保护）。来源固定按 DeepSeek → Codex → OpenCode Go 排列，未配置/未登录来源不返回，已配置但本次查询失败的来源也不返回。
+
+```json
+{
+  "ok": true,
+  "fetchedAt": "2026-08-30T12:00:00.000Z",
+  "availableCount": 3,
+  "failedCount": 0,
+  "sources": [
+    { "id": "deepseek", "title": "DeepSeek", "kind": "balance",
+      "amount": "12.50", "currency": "CNY", "available": true },
+    { "id": "codex", "title": "Codex", "kind": "quota",
+      "account": { "displayName": "Personal", "maskedEmail": "p***@example.com" },
+      "windows": [
+        { "window": "5h", "remainingPercent": 72, "resetAt": "2026-08-30T13:00:00.000Z" },
+        { "window": "weekly", "remainingPercent": 64 }
+      ],
+      "credits": { "unlimited": false, "balance": "8.00" },
+      "individualLimit": { "limit": "100", "used": "28", "remaining": "72", "remainingPercent": 72 }
+    },
+    { "id": "opencode-go", "title": "OpenCode Go", "kind": "quota",
+      "windows": [
+        { "window": "5h", "remainingPercent": 91 },
+        { "window": "weekly", "remainingPercent": 83 },
+        { "window": "monthly", "remainingPercent": 76 }
+      ]
+    }
+  ]
+}
+```
+
+- Codex 通过 `dsh-codex-connect` 的 `OpenAICodexCredentialStore`、`openAICodexAuthStatus` 与 `readOpenAICodexRateLimits` 查询同一份当前活动账户快照；若 Codex 配置启用代理，额度请求复用其 `OpenAICodexProxyManager`，代理不可用时不直连；不读取/复制 OAuth 文件，不返回 token。
+- OpenCode Go 优先读取 `llm-pi-ai` 的 `opencode-go.apiKeyEnv`，其次读取 `llm-pi-ai/opencode-go` API-key record，再回退 `OPENCODE_GO_API_KEY` / `OPENCODE_API_KEY`；请求固定发送到官方 `GET https://opencode.ai/zen/go/v1/usage`，不接受任意 baseURL。`percent` 转换为 `remainingPercent = 100 - percent`，`rate-limited` 窗口仍保留并标记 `limited: true`。
+- `failedCount` 只统计“已配置但本次查询失败”的来源；未配置来源不算失败。`failedCount > 0` 时 App 显示汇总提示，不显示失败来源细节。
+- 查询快照在电脑进程内缓存 60 秒并共享并发请求；手动 `refresh=1` 的连点在 2 秒内复用快照；不写手机或电脑持久化文件。配额窗口不相加，有限 Credits 和个人消费上限分别展示。
+- HTTP 错误只返回通用 `502 account-usage-failed`（单来源失败不会使整体请求失败）。
+
+**悬浮球面板消费语义（v3.2）**：原生悬浮球面板把本端点当作「展开时按需读取」的快照——每次展开面板最多触发一次查询（客户端 2 分钟节流，不并入面板打开期间的 5 秒轮询，也不做后台周期轮询）；成功快照在进程内保留，失败时沿用旧值并标注相对时间；投影不可用（旧插件 404 / 未配置 / 全部失败）时，面板整体降级为原有的单行 DeepSeek 余额。面板按「一个来源一行」渲染：金额来源保留文字（CNY 优先），配额来源只显示主 bucket 窗口的细条与颜色、不出百分比数字，每个进度条上方居中显示窗口短标签（5h / 每周 / 每月，与详情页窗口语义一致）；附加 bucket（服务端命名的 `名称 · 5h`）与账户身份不出现 overlay 面板，详情页仍是完整信息入口（`displayName`/`maskedEmail`、Credits、个人消费上限、重置时间）。
+
+### 6.17 文件传输（v3.1.2，B站 csborbbnc 反馈）
+
+**GET `/m/api/files?path=…`** — 下载电脑文件
+- 响应：`200` 文件流（`content-type` 按扩展名推断、`content-disposition: attachment` 带 UTF-8 文件名）；路径不存在或非文件 → `404 file-not-found`；缺 `path` → `400 bad-request`
+- 与目录选择器（§6.1）同信任模型：口令鉴权 + 现有限流，路径由手机显式指定
+
+**POST `/m/api/files/upload`** — 上传文件到电脑（写会话工作目录）
+```json
+请求: { "sessionId": "…(可选)", "name": "README.md", "data": "<base64>" }
+响应: { "ok": true, "path": "F:\\DSH-Outpost\\README.md", "bytes": 1234 }
+```
+- 目标目录：`sessionId` 对应 agent 的工作目录 → 缺省回退第一个注册工作区根；无法确定 → `503 no-workspace`
+- `name` 不合法（含 `\ / : * ? " < > |`、`.`/`..`/超 255）→ `400 invalid-name`；body 上限 64MB → `413 payload-too-large`
+
+
+
+
+
