@@ -34,7 +34,7 @@ graph LR
 | 插件源码 | `<本仓库>/`（package.json / lib / docs / tools） |
 | 已安装副本 | `~/.dsh/profiles/desktop/node_modules/dsh-mobile-remote/`（web 版为 `profiles/web/...`） |
 | profile 依赖声明 | `~/.dsh/profiles/<profile>/package.json` → `"dsh-mobile-remote": "file:<本仓库路径>"` |
-| 启用配置 | `~/.dsh/profiles/<profile>/cordis.patch.yml`（insert mobile-remote 行；**无需覆盖 webserver 行**，见 §4 警示） |
+| 启用配置 | v3.1.7+ **插件包自带 bundle 层，装完即启用**（无需手写行）；要改配置在 `~/.dsh/profiles/<profile>/cordis.patch.yml` 里**按 id 覆盖**（`- id: mobile-remote` + `config`；**不要 insert**，见 §4）；**无需覆盖 webserver 行**，见 §4 警示 |
 | 访问口令 | 部署时生成（`crypto.randomBytes(24).toString('base64url')`），写入 `authToken` |
 
 ### 2.1 依赖声明的两种方式
@@ -85,17 +85,19 @@ corepack pnpm install
 
 ## 4. 变更配置（口令/路径/充值地址）
 
-编辑 `cordis.patch.yml` 改 `mobile-remote` 行的 `config`，然后重启：
+v3.1.7 起 `mobile-remote` 行由插件包自带的 bundle 层插入，profile 只需**按 id 覆盖 config**，然后重启：
 
 ```yaml
-- insert:
-    - id: mobile-remote
-      name: dsh-mobile-remote
-      config:
-        path: /m
-        authToken: <新口令，留空=关闭认证>
-        rechargeUrl: https://platform.deepseek.com/top_up
+- id: mobile-remote
+  name: dsh-mobile-remote
+  config:
+    path: /m
+    authToken: <新口令，留空=关闭认证>
+    rechargeUrl: https://platform.deepseek.com/top_up
 ```
+
+> ⚠️ **不要再 `insert: - id: mobile-remote`**：bundle 层已提供该行，重复 insert 会组成**两条同名行**（实测 `npx @deepseek-ai/dsh --profile <p> --dump-config` 输出两行，且 Loader 侧行为不确定）。`- id: mobile-remote` 这种按 id 的写法是覆盖，不会新增行。
+> 若插件是 v3.1.6 及更早（未声明 `dsh.bundle`），才需要手写 `insert` 行启用——升级到 v3.1.7+ 后请把原来的 `insert` 改成上面的按 id 覆盖形式。
 
 口令生成建议：`node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"`
 
@@ -147,13 +149,12 @@ corepack pnpm install
 - **隧道/中继类**（frp 自建 / SakuraFrp 托管等）：手机经公网中继访问时，请求的 Host 头是中继地址，需在插件配置显式放行 + 强口令：
 
 ```yaml
-- insert:
-    - id: mobile-remote
-      name: dsh-mobile-remote
-      config:
-        path: /m
-        authToken: <16位以上随机口令>       # 公网段的唯一防线，必须强随机
-        trustedHosts: ["<中继域名或IP>"]    # 如 frp-boy.com / xxx.natfrp.com
+- id: mobile-remote
+  name: dsh-mobile-remote
+  config:
+    path: /m
+    authToken: <16位以上随机口令>       # 公网段的唯一防线，必须强随机
+    trustedHosts: ["<中继域名或IP>"]    # 如 frp-boy.com / xxx.natfrp.com
 ```
 
 > 隧道类注意：域名接入国内托管/反代通常要求 **ICP 备案**（自有域名绑定公网服务必然遇到）；未备案时请选择**免备案节点地址/自带域名**，并务必保证 **TLS**（公网明文 HTTP = 口令暴露，违反 04-security 禁止项）；若隧道方案拿不到 TLS/免备案入口，请转向 §5.1 的虚拟组网。
@@ -175,18 +176,17 @@ corepack pnpm install
 
 ### Server酱（微信服务号推送，安卓/全平台通用）
 ```yaml
-- insert:
-    - id: mobile-remote
-      name: dsh-mobile-remote
-      config:
-        path: /m
-        authToken: <口令>
-        pushUrls:
-          - name: 微信
-            # Server酱³（推荐）：SendKey 页面可复制 API URL，形如
-            # https://<uid>.push.ft07.com/send/<sendkey>.send （key 以 sctp…t 开头）
-            url: https://<uid>.push.ft07.com/send/<sendkey>.send
-            format: serverchan
+- id: mobile-remote
+  name: dsh-mobile-remote
+  config:
+    path: /m
+    authToken: <口令>
+    pushUrls:
+      - name: 微信
+        # Server酱³（推荐）：SendKey 页面可复制 API URL，形如
+        # https://<uid>.push.ft07.com/send/<sendkey>.send （key 以 sctp…t 开头）
+        url: https://<uid>.push.ft07.com/send/<sendkey>.send
+        format: serverchan
 ```
 
 Server酱³ SendKey 获取：手机微信扫码打开 `https://sc3.ft07.com/sendkey` → 复制 **API URL**（推荐，`push.ft07.com` 官方入口）。老 Turbo 接口 `sctapi.ftqq.com` 域名偶发不可用（实测 400/连接失败，2026-08），建议用 ³ 官方 URL；`format: serverchan` 两者通用（form: title/desp）。**免费版每天 5 条上限**（AUTH 40001），需更多条数请升级。

@@ -80,13 +80,14 @@
 cd C:\Users\<你>\.dsh\profiles\web
 corepack pnpm install
 
-# 3. 启用插件（cordis.patch.yml，见下方配置节）后启动
+# 3. 启动：插件包自带 bundle 层（v3.1.7+），装完即已启用，无需手写 insert 行
+#    （要改 path/口令/推送等，见下方「配置」节：按 id 覆盖，不要再 insert）
 npx @deepseek-ai/dsh web
 ```
 
 ### 方式二：DeepSeek Harness 桌面端（当前主线）
 
-安装插件后**重启 DSH Desktop** 即可（desktop profile 自动加载；移动端经插件 **LAN 桥**，默认 `0.0.0.0:3080`，见 「LAN 桥」节与 docs/06 §4b）。
+安装插件后**重启 DSH Desktop** 即可（插件包声明了 `dsh.bundle`，装完即注册为 profile bundle：侧边栏「插件 → 已安装」会出现卡片，也可用插件管理器开关/卸载；移动端经插件 **LAN 桥**，默认 `0.0.0.0:3080`，见 「LAN 桥」节与 docs/06 §4b）。
 
 ### LAN 桥（桌面版必开，手机局域网直连）
 
@@ -110,17 +111,19 @@ npx @deepseek-ai/dsh web
 
 ## 配置（cordis.patch.yml）
 
+> **v3.1.7 起，行由插件自带的 bundle 层插入**——profile 的 `cordis.patch.yml` 只按 id **覆盖 config**。
+> ⚠️ 不要再写 `insert: - id: mobile-remote`：bundle 层已提供该行，重复 insert 会组成两条同名行（`--dump-config` 可见两行）。
+
 ```yaml
-- insert:
-    - id: mobile-remote
-      name: dsh-mobile-remote
-      config:
-        path: /m
-        authToken: <访问口令，留空=关闭认证>
-        pushUrls: []   # 见下方推送配置
-        # pushContent: standard  # 默认 minimal：推送只含事件类型+会话短码（核心内容不外出）；standard 才含标题/详情
-        # rateLimit: { maxFailures: 10, windowMs: 60000, blockMs: 60000 }  # 登录失败限流
-        # trustedHosts: ["<内网穿透中继地址>"]  # 仅 frp 等中继方案需要，见 docs/06 §5B
+- id: mobile-remote
+  name: dsh-mobile-remote
+  config:
+    path: /m
+    authToken: <访问口令，留空=关闭认证>
+    pushUrls: []   # 见下方推送配置
+    # pushContent: standard  # 默认 minimal：推送只含事件类型+会话短码（核心内容不外出）；standard 才含标题/详情
+    # rateLimit: { maxFailures: 10, windowMs: 60000, blockMs: 60000 }  # 登录失败限流
+    # trustedHosts: ["<内网穿透中继地址>"]  # 仅 frp 等中继方案需要，见 docs/06 §5B
 ```
 
 ## 桌面设置页入口（客户端模块）

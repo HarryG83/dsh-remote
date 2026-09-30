@@ -1,5 +1,17 @@
 # Changelog
 
+## v3.1.7（2026-09-30）— 声明 dsh.bundle，插件注册为 profile bundle
+
+> 版本：插件 `3.1.7`（App 无改动，沿用 `3.1.5+22`）。
+
+### 插件改为标准 Cordis bundle（修复「插件 → 已安装」里看不到本插件）
+
+- 新增 `cordis.patch.yml`：bundle 层插入 `mobile-remote` 宿主行（`/m` 路由、LAN 桥、推送桥），并在 `package.json` 声明 `dsh.bundle.patch`（同时收录进 `files`/`exports`，GitHub 安装走 pack，漏收录则该文件不会进安装包）。
+- **修复现象**：此前插件只作为 profile `dependencies` 存在、靠手写 `insert` 行启用。插件管理器只把声明了 `dsh.bundle` 的依赖当作 bundle，未声明的普通依赖会被**排除在侧边栏「插件 → 已安装」之外**（既没有卡片，也没有开关/卸载），DSH 重启后也不会自动挂载。
+- 配置方式不变（`path` / `authToken` / `lanBridge` / `pushUrls` / `trustedHosts` / `approvalMode` 全部照旧），但**改为按 id 覆盖**：`- id: mobile-remote` + `config`。
+- ⚠️ **不要再用 `insert:` 插入 `mobile-remote`**：bundle 层已提供该行，重复 insert 会组成**两条同名行**（实测 `--dump-config` 输出两行）。README / docs/06 / FAQ 的手写行示例已同步改为按 id 覆盖。
+- 兼容性：`@deepseek-ai/dsh-*` peer 范围与 dsh 0.2.0-rc.2 实测兼容（`evaluatePluginCompatibility` 通过，不会被 profile 跳过）。
+
 ## v3.1.6（2026-09-29）— 二维码地址页签切换
 
 > 版本：插件 `3.1.6`。
